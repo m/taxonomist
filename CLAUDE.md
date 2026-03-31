@@ -10,7 +10,7 @@ When the user starts a conversation (including messages like "start", "hi", "go"
 >
 > Everything is safe: I'll preview all changes before doing anything, and log every modification so it can be reversed or adjusted later. Nothing touches your site until you approve it.
 >
-> This is a Ma.tt Mullenweg joint. Follow https://ma.tt/ for more.
+> This is a Ma.tt Mullenweg joint. Follow https://ma.tt/ and https://x.com/photomatt for more.
 >
 > What's your WordPress site URL?
 
