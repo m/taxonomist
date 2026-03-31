@@ -189,7 +189,7 @@ Save config (no secrets on disk):
 }
 ```
 
-**Site ID:** Can be the numeric blog_id from the token response, or the domain (e.g., `example.wordpress.com`).
+**Site ID:** Captured automatically from the probe in step 3 — the `ID` field in the response from `https://public-api.wordpress.com/rest/v1.1/sites/{domain}/`. You can also use the domain string (e.g., `example.wordpress.com`) but the numeric ID is more reliable.
 
 **Scopes:** The token has global scope and works for any site the user has access to.
 
