@@ -88,7 +88,7 @@ $unresolved = array();
 foreach ( $suggestions as $suggestion ) {
 	$suggested_refs = isset( $suggestion['cats'] ) ? $suggestion['cats'] : array();
 	foreach ( $suggested_refs as $ref ) {
-		if ( ! isset( $slug_to_id[ $ref ] ) && ! isset( $name_to_slug[ strtolower( $ref ) ] ) ) {
+		if ( ! isset( $slug_to_id[ $ref ] ) ) {
 			$unresolved[ $ref ] = true;
 		}
 	}
@@ -103,10 +103,10 @@ if ( ! empty( $unresolved ) ) {
 
 // Open the change log.
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fopen
-// phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 $log = fopen( $log_file, 'w' );
-fwrite( $log, "timestamp\taction\tpost_id\tpost_title\told_categories\tnew_categories\tcats_added\tcats_removed\n" );
+// Use fputcsv for secure TSV logging (handles internal tabs/newlines).
+fputcsv( $log, array( 'timestamp', 'action', 'post_id', 'post_title', 'old_categories', 'new_categories', 'cats_added', 'cats_removed' ), "\t" );
 
 $changes     = 0;
 $skipped     = 0;
@@ -145,13 +145,11 @@ foreach ( $suggestions as $suggestion ) {
 		}
 	}
 
-	// Resolve suggestions to term IDs. Try slug first, fall back to name.
+	// Resolve suggestions to term IDs via slug.
 	$suggested_ids = array();
 	foreach ( $suggested_refs as $ref ) {
 		if ( isset( $slug_to_id[ $ref ] ) ) {
 			$suggested_ids[] = $slug_to_id[ $ref ];
-		} elseif ( isset( $name_to_slug[ strtolower( $ref ) ] ) ) {
-			$suggested_ids[] = $slug_to_id[ $name_to_slug[ strtolower( $ref ) ] ];
 		}
 	}
 
@@ -197,15 +195,20 @@ foreach ( $suggestions as $suggestion ) {
 	}
 
 	// Write the change to the log before applying.
-	$ts         = gmdate( 'Y-m-d H:i:s' );
-	$post_title = str_replace( "\t", ' ', $current_post->post_title );
-	fwrite(
+	$ts = gmdate( 'Y-m-d H:i:s' );
+	fputcsv(
 		$log,
-		"$ts\tSET_CATS\t$current_post_id\t$post_title\t" .
-		implode( '|', array_values( $current_names ) ) . "\t" .
-		implode( '|', $new_names ) . "\t" .
-		implode( '|', $added_names ) . "\t" .
-		implode( '|', $removed_names ) . "\n"
+		array(
+			$ts,
+			'SET_CATS',
+			$current_post_id,
+			$current_post->post_title,
+			implode( '|', array_values( $current_names ) ),
+			implode( '|', $new_names ),
+			implode( '|', $added_names ),
+			implode( '|', $removed_names ),
+		),
+		"\t"
 	);
 
 	if ( 'apply' === $apply_mode ) {

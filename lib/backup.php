@@ -58,27 +58,41 @@ foreach ( $terms as $t ) {
 }
 
 // Export every published post's category assignments.
-// We store both IDs (for direct restore) and slugs (for cross-site portability
-// and resilience against term ID changes after deletion/recreation).
-$all_posts = get_posts(
-	array(
-		'numberposts' => -1,
-		'post_status' => 'publish',
-		'post_type'   => 'post',
-	)
-);
+// We fetch in chunks to avoid memory exhaustion on large sites.
+$post_cats      = array();
+$posts_per_page = 200;
+$current_page   = 1;
 
-$post_cats = array();
-foreach ( $all_posts as $p ) {
-	$cat_ids   = wp_get_post_categories( $p->ID );
-	$cat_slugs = wp_get_post_categories( $p->ID, array( 'fields' => 'slugs' ) );
-
-	$post_cats[] = array(
-		'post_id'        => $p->ID,
-		'post_title'     => $p->post_title,
-		'category_ids'   => $cat_ids,
-		'category_slugs' => array_values( $cat_slugs ),
+while ( true ) {
+	$all_posts = get_posts(
+		array(
+			'posts_per_page' => $posts_per_page,
+			'paged'          => $current_page,
+			'post_status'    => 'publish',
+			'post_type'      => 'post',
+			'orderby'        => 'ID',
+			'order'          => 'ASC',
+		)
 	);
+
+	if ( empty( $all_posts ) ) {
+		break;
+	}
+
+	foreach ( $all_posts as $p ) {
+		$cat_ids   = wp_get_post_categories( $p->ID );
+		$cat_slugs = wp_get_post_categories( $p->ID, array( 'fields' => 'slugs' ) );
+
+		$post_cats[] = array(
+			'post_id'        => $p->ID,
+			'post_title'     => $p->post_title,
+			'category_ids'   => $cat_ids,
+			'category_slugs' => array_values( $cat_slugs ),
+		);
+	}
+
+	wp_cache_flush();
+	++$current_page;
 }
 
 // Capture the default category setting so restore can reset it.

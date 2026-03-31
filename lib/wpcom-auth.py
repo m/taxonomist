@@ -29,7 +29,7 @@ import urllib.request
 import webbrowser
 
 CLIENT_ID = "136301"
-CLIENT_SECRET = "Vy27l7cBxu3h42mdhK536QXVQgedeIlte3JAXS2FsqDv0yJf9xoRMIObcogWcUVv"
+CLIENT_SECRET = "Vy27l7cBxu3h42mdhK536QXVQgedeIlte3JAXS2FsqDv0yJf9xoRMIObcogWcUVv"  # Native app — intentionally public per OAuth spec
 LISTEN_PORT = 19823
 REDIRECT_URI = f"http://localhost:{LISTEN_PORT}"
 TIMEOUT = 120  # seconds to wait for user to authorize

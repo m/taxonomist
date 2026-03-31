@@ -36,6 +36,14 @@ For deleted terms, also write to `data/logs/terms-deleted-{timestamp}.tsv`:
 timestamp	term_id	name	slug	description	count	merged_into
 ```
 
+## Safety & Shell Escaping
+
+**CRITICAL**: When executing shell commands (WP-CLI or curl) that include category names, slugs, or post titles, you MUST ensure they are properly escaped for the shell to prevent command injection.
+
+- **Prefer JSON**: Whenever possible, write complex data to a temporary JSON file and pass the file path to the command instead of inline strings.
+- **Quote Everything**: Always wrap arguments in single quotes. If an argument contains a single quote, escape it properly (e.g., `'\''`).
+- **Sanitize**: Strip any characters that could be used for command substitution (`$`, `` ` ``, `\`).
+
 ## Operations
 
 ### Create Category

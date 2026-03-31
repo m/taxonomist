@@ -41,61 +41,75 @@ $output_file = getenv( 'TAXONOMIST_OUTPUT' ) ? getenv( 'TAXONOMIST_OUTPUT' ) : '
 $fp = fopen( $output_file, 'w' );
 fwrite( $fp, "[\n" );
 
-// Fetch every published post, ordered by ID for deterministic output.
-$all_posts = get_posts(
-	array(
-		'numberposts' => -1,
-		'post_status' => 'publish',
-		'post_type'   => 'post',
-		'orderby'     => 'ID',
-		'order'       => 'ASC',
-	)
-);
+// Fetch published posts in chunks to avoid memory exhaustion.
+$posts_per_page = 100;
+$current_page   = 1;
+$total_exported = 0;
+$first          = true;
 
-$total = count( $all_posts );
-$i     = 0;
-
-foreach ( $all_posts as $p ) {
-	// Get both category names (for AI analysis readability) and slugs
-	// (as stable identifiers that survive renames). The apply script
-	// resolves suggestions by slug, not name, to prevent drift.
-	$cat_names = wp_get_post_categories( $p->ID, array( 'fields' => 'names' ) );
-	$cat_slugs = wp_get_post_categories( $p->ID, array( 'fields' => 'slugs' ) );
-
-	// Strip HTML and collapse whitespace for clean plain-text content.
-	// Full content is preserved (not truncated) for accurate AI analysis.
-	$content = wp_strip_all_tags( $p->post_content );
-	$content = preg_replace( '/\s+/', ' ', $content );
-	$content = trim( $content );
-
-	$row = wp_json_encode(
-		array(
-			'id'             => $p->ID,
-			'title'          => html_entity_decode( $p->post_title, ENT_QUOTES, 'UTF-8' ),
-			'date'           => $p->post_date,
-			'content'        => $content,
-			'categories'     => array_values( $cat_names ),
-			'category_slugs' => array_values( $cat_slugs ),
-			'url'            => get_permalink( $p->ID ),
-		)
+while ( true ) {
+	$query_args = array(
+		'posts_per_page' => $posts_per_page,
+		'paged'          => $current_page,
+		'post_status'    => 'publish',
+		'post_type'      => 'post',
+		'orderby'        => 'ID',
+		'order'          => 'ASC',
 	);
 
-	fwrite( $fp, $row );
-	++$i;
+	$all_posts = get_posts( $query_args );
 
-	// Comma-separate entries, but not after the last one.
-	if ( $i < $total ) {
-		fwrite( $fp, ",\n" );
+	if ( empty( $all_posts ) ) {
+		break;
 	}
 
-	// Progress reporting every 500 posts.
-	if ( 0 === $i % 500 ) {
-		WP_CLI::log( "Exported $i/$total posts..." );
+	foreach ( $all_posts as $p ) {
+		// Comma-separate entries, but not before the first one.
+		if ( ! $first ) {
+			fwrite( $fp, ",\n" );
+		}
+		$first = false;
+
+		// Get both category names (for AI analysis readability) and slugs
+		// (as stable identifiers that survive renames). The apply script
+		// resolves suggestions by slug, not name, to prevent drift.
+		$cat_names = wp_get_post_categories( $p->ID, array( 'fields' => 'names' ) );
+		$cat_slugs = wp_get_post_categories( $p->ID, array( 'fields' => 'slugs' ) );
+
+		// Strip HTML and collapse whitespace for clean plain-text content.
+		// Full content is preserved (not truncated) for accurate AI analysis.
+		$content = wp_strip_all_tags( $p->post_content );
+		$content = preg_replace( '/\s+/', ' ', $content );
+		$content = trim( $content );
+
+		$row = wp_json_encode(
+			array(
+				'id'             => $p->ID,
+				'title'          => html_entity_decode( $p->post_title, ENT_QUOTES, 'UTF-8' ),
+				'date'           => $p->post_date,
+				'content'        => $content,
+				'categories'     => array_values( $cat_names ),
+				'category_slugs' => array_values( $cat_slugs ),
+				'url'            => get_permalink( $p->ID ),
+			)
+		);
+
+		fwrite( $fp, $row );
+		++$total_exported;
+
+		// Progress reporting every 500 posts.
+		if ( 0 === $total_exported % 500 ) {
+			WP_CLI::log( "Exported $total_exported posts..." );
+		}
 	}
+
+	// Crucial: flush WordPress's internal cache after each page to free up memory.
+	wp_cache_flush();
+	++$current_page;
 }
 
 fwrite( $fp, "\n]" );
 fclose( $fp );
 // phpcs:enable
 
-WP_CLI::success( "Exported $total posts to $output_file" );
+WP_CLI::success( "Exported $total_exported posts to $output_file" );

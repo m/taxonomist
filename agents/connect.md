@@ -100,7 +100,7 @@ Taxonomist is registered as a WordPress.com OAuth2 app. Users do NOT need to reg
 
 **Credentials (embedded — safe for native/CLI apps per OAuth spec):**
 - Client ID: `136301`
-- Client Secret: `Vy27l7cBxu3h42mdhK536QXVQgedeIlte3JAXS2FsqDv0yJf9xoRMIObcogWcUVv`
+- Client Secret: `Vy27l7cBxu3h42mdhK536QXVQgedeIlte3JAXS2FsqDv0yJf9xoRMIObcogWcUVv` (native app — intentionally public per OAuth spec, same as GitHub CLI)
 
 **Detection:** Check if the site is on WordPress.com (`*.wordpress.com`) or has Jetpack:
 - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` (returns site info if accessible)
