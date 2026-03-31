@@ -7,9 +7,7 @@ Analyzes every post on your WordPress blog and suggests an improved category str
 ## Quick Start
 
 ```bash
-curl -sL https://github.com/m/taxonomist/archive/main.tar.gz | tar xz
-cd taxonomist-main
-claude "start"
+curl -sL https://github.com/m/taxonomist/archive/main.tar.gz | tar xz && cd taxonomist-main && claude "start"
 ```
 
 [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) first if you haven't already.
