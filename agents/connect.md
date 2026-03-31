@@ -106,22 +106,53 @@ Taxonomist is registered as a WordPress.com OAuth2 app. Users do NOT need to reg
 - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` (returns site info if accessible)
 - `curl -s {url}/wp-json/jetpack/v4/module` (Jetpack present on self-hosted)
 
-**Getting a token (password grant — no browser needed):**
+**Getting a token (authorization code flow with local server):**
 
-1. Ask the user for their WordPress.com username
-2. Ask them to create an Application Password at https://wordpress.com/me/security/application-passwords (needed if 2FA is enabled, recommended regardless)
-3. Exchange for a bearer token:
+1. Start a temporary local HTTP server to catch the OAuth redirect:
+
+```python
+python3 -c "
+import http.server, urllib.parse, json
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        code = q.get('code', [''])[0]
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'Authorization complete! You can close this tab.')
+        with open('/tmp/taxonomist-auth-code.txt', 'w') as f:
+            f.write(code)
+        raise KeyboardInterrupt
+    def log_message(self, *a): pass
+try: http.server.HTTPServer(('localhost', 80), H).serve_forever()
+except KeyboardInterrupt: pass
+" &
+```
+
+If port 80 is unavailable, use another port — but the redirect URI registered for the app is `http://localhost` (port 80). Alternatively, tell the user to copy the `?code=` value from the URL bar if the redirect fails.
+
+2. Open the authorization URL in the user's browser:
 
 ```bash
-curl -X POST https://public-api.wordpress.com/oauth2/token \
+open "https://public-api.wordpress.com/oauth2/authorize?client_id=136301&redirect_uri=http://localhost&response_type=code&scope=global"
+```
+
+3. User clicks "Approve" in their browser. The redirect hits the local server, which captures the auth code.
+
+4. Exchange the code for a token:
+
+```bash
+curl -s -X POST https://public-api.wordpress.com/oauth2/token \
   -d client_id=136301 \
   -d "client_secret=Vy27l7cBxu3h42mdhK536QXVQgedeIlte3JAXS2FsqDv0yJf9xoRMIObcogWcUVv" \
-  -d grant_type=password \
-  -d "username=USER" \
-  -d "password=APP_PASSWORD"
+  -d grant_type=authorization_code \
+  -d "code=AUTH_CODE" \
+  -d "redirect_uri=http://localhost"
 ```
 
 Response: `{"access_token": "TOKEN", "blog_id": "...", "token_type": "bearer"}`
+
+**Fallback if the local server doesn't work:** Tell the user to copy the `code` parameter from the URL bar after the redirect fails (it will show `http://localhost/?code=XXXXX`). Then exchange that code manually.
 
 4. Save to config:
 ```json
