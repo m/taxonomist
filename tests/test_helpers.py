@@ -17,6 +17,7 @@ from helpers import (
     aggregate_results,
     calculate_batch_size,
     parse_change_log,
+    resolve_category_export_row,
     split_into_batches,
     validate_backup,
     validate_export,
@@ -242,17 +243,17 @@ class TestAggregateResults(unittest.TestCase):
     def test_combines_batches(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_result(tmpdir, 'result-000.json', [
-                {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
-                {'post_id': 2, 'cats': ['Music'], 'new_cats': ['Jazz']},
+                {'post_id': 1, 'cats': [10], 'new_cats': []},
+                {'post_id': 2, 'cats': [20], 'new_cats': ['Jazz']},
             ])
             self._write_result(tmpdir, 'result-001.json', [
-                {'post_id': 3, 'cats': ['Tech', 'AI'], 'new_cats': []},
+                {'post_id': 3, 'cats': [10, 30], 'new_cats': []},
             ])
             suggestions, cat_counts, new_counts = aggregate_results(tmpdir)
             self.assertEqual(len(suggestions), 3)
-            self.assertEqual(cat_counts['Tech'], 2)
-            self.assertEqual(cat_counts['Music'], 1)
-            self.assertEqual(cat_counts['AI'], 1)
+            self.assertEqual(cat_counts[10], 2)
+            self.assertEqual(cat_counts[20], 1)
+            self.assertEqual(cat_counts[30], 1)
             self.assertEqual(new_counts['Jazz'], 1)
 
     def test_empty_directory(self):
@@ -264,7 +265,7 @@ class TestAggregateResults(unittest.TestCase):
     def test_ignores_non_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_result(tmpdir, 'result-000.json', [
-                {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
+                {'post_id': 1, 'cats': [10], 'new_cats': []},
             ])
             with open(os.path.join(tmpdir, 'notes.txt'), 'w') as f:
                 f.write('ignore me')
@@ -274,10 +275,10 @@ class TestAggregateResults(unittest.TestCase):
     def test_ignores_non_result_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_result(tmpdir, 'result-000.json', [
-                {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
+                {'post_id': 1, 'cats': [10], 'new_cats': []},
             ])
             self._write_result(tmpdir, 'categories.json', [
-                {'post_id': 99, 'cats': ['Noise'], 'new_cats': []},
+                {'post_id': 99, 'cats': [99], 'new_cats': []},
             ])
             suggestions, _, _ = aggregate_results(tmpdir)
             self.assertEqual(len(suggestions), 1)
@@ -286,25 +287,25 @@ class TestAggregateResults(unittest.TestCase):
     def test_dedupes_duplicate_post_ids(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_result(tmpdir, 'result-000.json', [
-                {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
+                {'post_id': 1, 'cats': [10], 'new_cats': []},
             ])
             self._write_result(tmpdir, 'result-001.json', [
-                {'post_id': 1, 'cats': ['AI'], 'new_cats': ['ML']},
+                {'post_id': 1, 'cats': [30], 'new_cats': ['ML']},
             ])
             suggestions, cat_counts, new_counts = aggregate_results(tmpdir)
             self.assertEqual(len(suggestions), 1)
-            self.assertEqual(suggestions[0]['cats'], ['AI'])
-            self.assertEqual(cat_counts['AI'], 1)
-            self.assertNotIn('Tech', cat_counts)
+            self.assertEqual(suggestions[0]['cats'], [30])
+            self.assertEqual(cat_counts[30], 1)
+            self.assertNotIn(10, cat_counts)
             self.assertEqual(new_counts['ML'], 1)
 
     def test_sorted_file_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_result(tmpdir, 'result-001.json', [
-                {'post_id': 99, 'cats': ['B'], 'new_cats': []},
+                {'post_id': 99, 'cats': [99], 'new_cats': []},
             ])
             self._write_result(tmpdir, 'result-000.json', [
-                {'post_id': 1, 'cats': ['A'], 'new_cats': []},
+                {'post_id': 1, 'cats': [1], 'new_cats': []},
             ])
             suggestions, _, _ = aggregate_results(tmpdir)
             # result-000 should come first due to sorted() filename order.
@@ -323,6 +324,7 @@ class TestValidateExport(unittest.TestCase):
                 'date': '2024-01-01 00:00:00',
                 'content': 'Hello world',
                 'categories': ['Tech'],
+                'category_ids': [1],
                 'category_slugs': ['tech'],
                 'url': 'https://example.com/test',
             }
@@ -348,6 +350,9 @@ class TestValidateExport(unittest.TestCase):
                 'date': '2024-01-01',
                 'content': 'Hello',
                 'categories': ['Tech'],
+                'category_ids': [1],
+                'category_slugs': ['tech'],
+                'url': 'https://example.com/test',
             }
         ]
         errors = validate_export(posts)
@@ -364,6 +369,7 @@ class TestValidateExport(unittest.TestCase):
                 'date': '2024-01-01 00:00:00',
                 'content': 'Hello',
                 'categories': ['Tech', 5],
+                'category_ids': [1],
                 'category_slugs': ['tech'],
                 'url': 'https://example.com/test',
             }
@@ -371,19 +377,35 @@ class TestValidateExport(unittest.TestCase):
         errors = validate_export(posts)
         self.assertTrue(any('"categories" must contain only strings' in e for e in errors))
 
+    def test_category_ids_must_contain_ints(self):
+        posts = [
+            {
+                'post_id': 1,
+                'title': 'Test',
+                'date': '2024-01-01 00:00:00',
+                'content': 'Hello',
+                'categories': ['Tech'],
+                'category_ids': ['1'],
+                'category_slugs': ['tech'],
+                'url': 'https://example.com/test',
+            }
+        ]
+        errors = validate_export(posts)
+        self.assertTrue(any('"category_ids" must contain only ints' in e for e in errors))
+
 
 class TestValidateSuggestions(unittest.TestCase):
     """Tests for suggestion JSON format validation."""
 
     def test_valid_suggestions(self):
         data = [
-            {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
-            {'post_id': 2, 'cats': ['Music', 'Jazz']},
+            {'post_id': 1, 'cats': [10], 'new_cats': []},
+            {'post_id': 2, 'cats': [20, 30]},
         ]
         self.assertEqual(validate_suggestions(data), [])
 
     def test_missing_post_id(self):
-        data = [{'cats': ['Tech']}]
+        data = [{'cats': [10]}]
         errors = validate_suggestions(data)
         self.assertTrue(any('missing "post_id"' in e for e in errors))
 
@@ -393,17 +415,17 @@ class TestValidateSuggestions(unittest.TestCase):
         self.assertTrue(any('missing "cats"' in e for e in errors))
 
     def test_cats_wrong_type(self):
-        data = [{'post_id': 1, 'cats': 'Tech'}]
+        data = [{'post_id': 1, 'cats': 10}]
         errors = validate_suggestions(data)
         self.assertTrue(any('"cats" must be list' in e for e in errors))
 
-    def test_cats_entries_must_be_strings(self):
-        data = [{'post_id': 1, 'cats': ['Tech', 7]}]
+    def test_cats_entries_must_be_ints(self):
+        data = [{'post_id': 1, 'cats': [10, '7']}]
         errors = validate_suggestions(data)
-        self.assertTrue(any('"cats" must contain only strings' in e for e in errors))
+        self.assertTrue(any('"cats" must contain only ints' in e for e in errors))
 
     def test_new_cats_entries_must_be_strings(self):
-        data = [{'post_id': 1, 'cats': ['tech'], 'new_cats': ['ml', 7]}]
+        data = [{'post_id': 1, 'cats': [10], 'new_cats': ['ml', 7]}]
         errors = validate_suggestions(data)
         self.assertTrue(any('"new_cats" must contain only strings' in e for e in errors))
 
@@ -457,6 +479,70 @@ class TestValidateBackup(unittest.TestCase):
         }
         errors = validate_backup(backup)
         self.assertTrue(any('missing "category_slugs"' in e for e in errors))
+
+
+class TestResolveCategoryExportRow(unittest.TestCase):
+    """Tests for exact category resolution from exported metadata."""
+
+    def setUp(self):
+        self.categories = [
+            {
+                'term_id': 101,
+                'name': 'Files & Subscriptions',
+                'slug': 'files-subscriptions-ios',
+                'description': '',
+                'count': 0,
+                'parent': 10,
+            },
+            {
+                'term_id': 202,
+                'name': 'Files & Subscriptions',
+                'slug': 'files-subscriptions-android',
+                'description': '',
+                'count': 1,
+                'parent': 20,
+            },
+        ]
+
+    def test_resolves_by_term_id(self):
+        category = resolve_category_export_row(self.categories, term_id=101)
+        self.assertEqual(category['slug'], 'files-subscriptions-ios')
+
+    def test_resolves_by_exact_slug(self):
+        category = resolve_category_export_row(
+            self.categories,
+            slug='files-subscriptions-android',
+        )
+        self.assertEqual(category['term_id'], 202)
+
+    def test_rejects_name_only_lookup(self):
+        with self.assertRaisesRegex(ValueError, 'name alone'):
+            resolve_category_export_row(
+                self.categories,
+                name='Files & Subscriptions',
+            )
+
+    def test_rejects_mismatched_term_id_and_slug(self):
+        with self.assertRaisesRegex(ValueError, 'different categories'):
+            resolve_category_export_row(
+                self.categories,
+                term_id=101,
+                slug='files-subscriptions-android',
+            )
+
+    def test_rejects_duplicate_slug(self):
+        categories = self.categories + [
+            {
+                'term_id': 303,
+                'name': 'Duplicate',
+                'slug': 'files-subscriptions-ios',
+                'description': '',
+                'count': 0,
+                'parent': 0,
+            }
+        ]
+        with self.assertRaisesRegex(ValueError, 'Duplicate slug'):
+            resolve_category_export_row(categories, slug='files-subscriptions-ios')
 
 
 class TestParseChangeLog(unittest.TestCase):
