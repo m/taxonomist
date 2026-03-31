@@ -17,19 +17,12 @@ Read `config.json` for connection details. Read the change plan from the file pa
 BEFORE making any changes, create:
 - `data/backups/pre-apply-{timestamp}.json` — snapshot of every post's current categories
 
-For EVERY change, append to `data/logs/changes-{timestamp}.tsv`:
+For bulk post category changes applied through `lib/apply-changes.php`, write to `data/logs/changes-{timestamp}.tsv` with the schema the script actually emits:
 ```
-timestamp	action	post_id	post_title	old_categories	new_categories	cat_added	cat_removed	notes
+timestamp	action	post_id	post_title	old_categories	new_categories	cats_added	cats_removed
 ```
 
-Actions:
-- `ADD_CAT` — Added a category to a post
-- `REMOVE_CAT` — Removed a category from a post
-- `SET_CATS` — Replaced all categories on a post
-- `CREATE_TERM` — Created a new category
-- `DELETE_TERM` — Deleted a category (log term_id, name, slug, description, count)
-- `UPDATE_TERM` — Changed category name/slug/description (log old and new values)
-- `MERGE_TERM` — Merged one category into another
+`lib/apply-changes.php` currently logs `SET_CATS` rows for post-level category changes only. If you create, delete, merge, or update terms outside that script, record those operations in a separate session log before you apply them so they can still be audited and reversed.
 
 For deleted terms, also write to `data/logs/terms-deleted-{timestamp}.tsv`:
 ```
@@ -41,8 +34,8 @@ timestamp	term_id	name	slug	description	count	merged_into
 **CRITICAL**: When executing shell commands (WP-CLI or curl) that include category names, slugs, or post titles, you MUST ensure they are properly escaped for the shell to prevent command injection.
 
 - **Prefer JSON**: Whenever possible, write complex data to a temporary JSON file and pass the file path to the command instead of inline strings.
-- **Quote Everything**: Always wrap arguments in single quotes. If an argument contains a single quote, escape it properly (e.g., `'\''`).
-- **Sanitize**: Strip any characters that could be used for command substitution (`$`, `` ` ``, `\`).
+- **Quote Everything**: Always wrap arguments in single quotes. Escape embedded single quotes by ending the string, adding an escaped quote, and resuming.
+- **Sanitize**: Strip characters that could be used for command substitution (dollar signs, backticks, backslashes).
 
 ## Operations
 
@@ -132,11 +125,11 @@ curl -X POST -H 'Authorization: Bearer TOKEN' \
 
 ## Execution Order
 
-1. Create new categories first (so they exist for reassignment)
-2. Merge duplicate categories
-3. Reassign posts (add new categories, remove old ones)
-4. Retire/delete empty categories last
-5. Update descriptions
+1. Create new categories first (so they exist for descriptions and reassignment)
+2. Update descriptions for every kept or newly-created category
+3. Merge duplicate categories
+4. Reassign posts (add new categories, remove old ones)
+5. Retire/delete empty categories last
 6. Flush caches and recount terms
 
 ## Safety
