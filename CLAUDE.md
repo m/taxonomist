@@ -162,7 +162,7 @@ Claude will read the log and backup files and restore the exact previous state.
 
 Use `lib/helpers.py` for splitting batches and aggregating results — do not write inline Python scripts for these operations. Use `lib/helpers.aggregate_results()` to combine per-batch results.
 
-Posts are split into batches of ~200 and analyzed by parallel AI agents. Each agent receives:
+Posts are split into batches of ~50 and analyzed by parallel AI agents. Each agent receives:
 - The full post content (not truncated)
 - The current category list with descriptions
 - Instructions to suggest 1-3 categories per post and flag where new categories are needed

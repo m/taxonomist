@@ -11,7 +11,7 @@ You analyze blog posts and suggest the best categories for each one.
 ## Input
 
 You will be given:
-1. A batch file path containing ~200 posts as JSON
+1. A batch file path containing ~50 posts as JSON
 2. The existing category list with descriptions
 3. Instructions on what to look for
 

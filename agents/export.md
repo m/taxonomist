@@ -92,7 +92,7 @@ Use `wp.getPosts` with pagination. Limited to ~100 posts per call.
 After exporting:
 1. Report total posts and categories exported
 2. Identify the **default category** (`wp option get default_category` or via REST/WP.com API settings endpoint) and note it — this category cannot be deleted without changing the setting first
-3. Split posts into batches of ~200 for parallel analysis: `data/batches/batch-NNN.json`
+3. Split posts into batches of ~50 for parallel analysis: `data/batches/batch-NNN.json`
 4. Show category distribution summary (top 20 categories by count)
 5. Flag any issues: posts with no categories, categories with 0 posts, duplicate slugs
 
@@ -105,7 +105,7 @@ from lib.helpers import write_batches
 import json
 with open('data/export/posts.json') as f:
     posts = json.load(f)
-write_batches(posts, 'data/batches/', batch_size=200)
+write_batches(posts, 'data/batches/', batch_size=50)
 ```
 
 ## Backup

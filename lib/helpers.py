@@ -13,7 +13,7 @@ import os
 from collections import Counter
 
 
-def split_into_batches(posts, batch_size=200):
+def split_into_batches(posts, batch_size=50):
     """
     Split a list of posts into fixed-size batches for parallel analysis.
 
@@ -31,7 +31,7 @@ def split_into_batches(posts, batch_size=200):
     return [posts[i:i + batch_size] for i in range(0, len(posts), batch_size)]
 
 
-def write_batches(posts, batch_dir, batch_size=200):
+def write_batches(posts, batch_dir, batch_size=50):
     """
     Split posts into batches and write each to a numbered JSON file.
 
