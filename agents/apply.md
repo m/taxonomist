@@ -82,6 +82,24 @@ curl -X POST -H 'Authorization: Bearer TOKEN' \
 
 ### Delete Category
 NEVER delete a category without first reassigning its posts. Log the deleted term's full data.
+
+**CRITICAL: Check the default category first.** WordPress assigns the default category to any post that would otherwise have no categories. Deleting it causes problems.
+
+```bash
+# WP-CLI — get the default category ID
+wp option get default_category
+# REST API
+curl -s -u user:pass {url}/wp-json/wp/v2/settings | python3 -c "import sys,json; print(json.load(sys.stdin).get('default_category'))"
+# WordPress.com API
+curl -s -H 'Authorization: Bearer TOKEN' 'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/settings' | python3 -c "import sys,json; print(json.load(sys.stdin).get('settings',{}).get('default_category'))"
+```
+
+If you need to retire the default category, change the default first:
+```bash
+wp option update default_category NEW_TERM_ID
+```
+
+Never delete the default category without changing the setting first.
 ```bash
 # WordPress.com API
 curl -X POST -H 'Authorization: Bearer TOKEN' \

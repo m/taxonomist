@@ -89,9 +89,10 @@ Use `wp.getPosts` with pagination. Limited to ~100 posts per call.
 
 After exporting:
 1. Report total posts and categories exported
-2. Split posts into batches of ~200 for parallel analysis: `data/batches/batch-NNN.json`
-3. Show category distribution summary (top 20 categories by count)
-4. Flag any issues: posts with no categories, categories with 0 posts, duplicate slugs
+2. Identify the **default category** (`wp option get default_category` or via REST/WP.com API settings endpoint) and note it — this category cannot be deleted without changing the setting first
+3. Split posts into batches of ~200 for parallel analysis: `data/batches/batch-NNN.json`
+4. Show category distribution summary (top 20 categories by count)
+5. Flag any issues: posts with no categories, categories with 0 posts, duplicate slugs
 
 ## Backup
 
