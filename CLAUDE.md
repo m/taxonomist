@@ -76,9 +76,9 @@ If no config exists, the tool will interactively help the user set one up by pro
 
 The WordPress.com REST API (`https://public-api.wordpress.com/rest/v1.1/`) works for both WordPress.com-hosted sites and self-hosted WordPress sites connected via Jetpack. This is often the easiest method for WordPress.com users since they already have an account.
 
-Authentication uses the OAuth2 password grant — the user provides their WordPress.com username and an Application Password, and the connect agent exchanges them for a bearer token. No browser redirect needed.
+Authentication uses the OAuth2 authorization code flow. The connect agent runs `python3 lib/wpcom-auth.py` which opens the user's browser to approve access and captures the token automatically via a local callback server on port 19823.
 
-Taxonomist is registered as a WordPress.com OAuth2 app (Client ID: `136301`). Users never need to register their own app.
+Taxonomist is registered as a WordPress.com OAuth2 app (Client ID: `136301`). Users never need to register their own app. Client secret is not required.
 
 ```json
 {
@@ -157,6 +157,8 @@ Claude will read the log and backup files and restore the exact previous state.
 
 ## Analysis Approach
 
+Use `lib/helpers.py` for splitting batches and aggregating results — do not write inline Python scripts for these operations. Use `lib/helpers.aggregate_results()` to combine per-batch results.
+
 Posts are split into batches of ~200 and analyzed by parallel AI agents. Each agent receives:
 - The full post content (not truncated)
 - The current category list with descriptions
@@ -229,5 +231,5 @@ Required operations:
 
 - This tool is designed to be driven by Claude Code, not run as a standalone script
 - The CLAUDE.md file is the primary interface — it tells Claude how to use the tool
-- PHP scripts in `lib/` are meant to be run via `wp eval-file` or called via REST API
+- PHP scripts in `lib/` are meant to be run via `wp eval-file` (WP-CLI only). For REST API and WordPress.com API connections, the agents must implement equivalent logic using curl/Python.
 - Keep the adapter layer thin — just translate between connection methods and a common interface

@@ -96,6 +96,18 @@ After exporting:
 4. Show category distribution summary (top 20 categories by count)
 5. Flag any issues: posts with no categories, categories with 0 posts, duplicate slugs
 
+## Splitting into Batches
+
+**You MUST use `lib/helpers.py` for splitting posts into batches. Do not write inline Python scripts.**
+
+```python
+from lib.helpers import write_batches
+import json
+with open('data/export/posts.json') as f:
+    posts = json.load(f)
+write_batches(posts, 'data/batches/', batch_size=200)
+```
+
 ## Backup
 
 Before any analysis, create a backup:

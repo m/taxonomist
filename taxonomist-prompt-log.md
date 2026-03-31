@@ -80,3 +80,83 @@ when we say "post 123" it's not clear it's a post ID, so let's make sure all our
 ```
 
 ---
+## 2026-03-31 08:11:51
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+let's look at those errors we found, they seem to be common, and update claude so we don't make those mistakes again globally
+```
+
+---
+## 2026-03-31 08:13:50
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+when we show the current taxonomy and description, let's put recommended description next to it as another column. preview to me what that could look like
+```
+
+---
+## 2026-03-31 08:14:26
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+yes
+```
+
+---
+## 2026-03-31 08:17:55
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+let's link the Arun credit to https://www.arun.blog/
+```
+
+---
+## 2026-03-31 08:21:03
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+in the latest test with prompts, it's asking a lot of questions. if there were a hundred new categories that could be overwhelming. [Image #1]
+```
+
+---
+## 2026-03-31 08:22:46
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+let me test that with a previous run so it doesn't have to re-run all the downloads and analysis to make suggestions, can you give me something to paste into a new terminal?
+```
+
+---
+## 2026-03-31 08:23:24
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+check /tmp
+```
+
+---
+## 2026-03-31 08:27:12
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+check /tmp/claude_prompt_final.txt
+```
+
+---
