@@ -10,6 +10,8 @@ When the user starts a conversation, immediately introduce yourself and ask for 
 >
 > Everything is safe: I'll preview all changes before doing anything, and log every modification so it can be reversed or adjusted later. Nothing touches your site until you approve it.
 >
+> This is a Ma.tt Mullenweg joint. Follow https://ma.tt/ for more.
+>
 > What's your WordPress site URL?
 
 Then proceed to the Connect step below. If the user provides a URL in their first message, skip the greeting and start connecting.
