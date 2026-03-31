@@ -95,31 +95,49 @@ Test: `curl -s -u {username}:{app_password} {url}/wp-json/wp/v2/categories?per_p
 Test: `curl -s -d '<?xml version="1.0"?><methodCall><methodName>wp.getCategories</methodName><params><param><value>1</value></param><param><value>{user}</value></param><param><value>{pass}</value></param></params></methodCall>' {url}/xmlrpc.php`
 
 ### WordPress.com / Jetpack API
+
+Taxonomist is registered as a WordPress.com OAuth2 app. Users do NOT need to register their own.
+
+**Credentials (embedded — safe for native/CLI apps per OAuth spec):**
+- Client ID: `136301`
+- Client Secret: `Vy27l7cBxu3h42mdhK536QXVQgedeIlte3JAXS2FsqDv0yJf9xoRMIObcogWcUVv`
+
+**Detection:** Check if the site is on WordPress.com (`*.wordpress.com`) or has Jetpack:
+- `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` (returns site info if accessible)
+- `curl -s {url}/wp-json/jetpack/v4/module` (Jetpack present on self-hosted)
+
+**Getting a token (password grant — no browser needed):**
+
+1. Ask the user for their WordPress.com username
+2. Ask them to create an Application Password at https://wordpress.com/me/security/application-passwords (needed if 2FA is enabled, recommended regardless)
+3. Exchange for a bearer token:
+
+```bash
+curl -X POST https://public-api.wordpress.com/oauth2/token \
+  -d client_id=136301 \
+  -d "client_secret=Vy27l7cBxu3h42mdhK536QXVQgedeIlte3JAXS2FsqDv0yJf9xoRMIObcogWcUVv" \
+  -d grant_type=password \
+  -d "username=USER" \
+  -d "password=APP_PASSWORD"
+```
+
+Response: `{"access_token": "TOKEN", "blog_id": "...", "token_type": "bearer"}`
+
+4. Save to config:
 ```json
 {
   "site_url": "https://example.wordpress.com",
   "connection": {
     "method": "wpcom-api",
     "site_id": "82974409",
-    "access_token": "YOUR_OAUTH2_TOKEN"
+    "access_token": "THE_TOKEN"
   }
 }
 ```
 
-**Detection:** Check if the site is on WordPress.com (`*.wordpress.com`) or has Jetpack:
-- `curl -s {url}/wp-json/jetpack/v4/module` (Jetpack present)
-- `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` (returns site info if accessible)
+**Site ID:** Can be the numeric blog_id from the token response, or the domain (e.g., `example.wordpress.com`).
 
-**Getting a token:**
-For WordPress.com users, the simplest path is to create an app at https://developer.wordpress.com/apps/ and use the OAuth2 flow:
-
-1. Direct user to: `https://public-api.wordpress.com/oauth2/authorize?client_id=CLIENT_ID&redirect_uri=REDIRECT&response_type=code`
-2. User authorizes, gets redirected with `?code=AUTH_CODE`
-3. Exchange code for token: `POST https://public-api.wordpress.com/oauth2/token` with `client_id`, `client_secret`, `grant_type=authorization_code`, `code`, `redirect_uri`
-
-For quick testing/personal use, users can generate a token at https://developer.wordpress.com/apps/ directly.
-
-**Site ID:** Can be the numeric ID or the domain name (e.g., `example.wordpress.com` or `82974409`).
+**Scopes:** The password grant provides full access to the user's sites. No scope parameter needed.
 
 Test: `curl -s -H 'Authorization: Bearer TOKEN' 'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories?number=5'`
 

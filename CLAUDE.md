@@ -59,7 +59,9 @@ If no config exists, the tool will interactively help the user set one up by pro
 
 The WordPress.com REST API (`https://public-api.wordpress.com/rest/v1.1/`) works for both WordPress.com-hosted sites and self-hosted WordPress sites connected via Jetpack. This is often the easiest method for WordPress.com users since they already have an account.
 
-Authentication uses OAuth2 bearer tokens. The connect agent will walk users through getting a token.
+Authentication uses the OAuth2 password grant — the user provides their WordPress.com username and an Application Password, and the connect agent exchanges them for a bearer token. No browser redirect needed.
+
+Taxonomist is registered as a WordPress.com OAuth2 app (Client ID: `136301`). Users never need to register their own app.
 
 ```json
 {
