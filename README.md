@@ -6,11 +6,21 @@ Analyzes every post on your WordPress blog and suggests an improved category str
 
 ## Quick Start
 
+### 1. Install Claude Code (if you haven't already)
+
 ```bash
-git clone https://github.com/m/taxonomist.git && cd taxonomist && claude
+npm install -g @anthropic-ai/claude-code
 ```
 
-That's it. Claude reads the instructions in this repo and walks you through everything — connecting to your site, analyzing posts, and applying changes with your approval at every step.
+Or see [other install methods](https://docs.anthropic.com/en/docs/claude-code/overview).
+
+### 2. Run Taxonomist
+
+```bash
+npx degit m/taxonomist taxonomist && cd taxonomist && claude
+```
+
+Claude reads the instructions in this repo and walks you through everything — connecting to your site, analyzing posts, and applying changes with your approval at every step.
 
 ## What It Does
 
@@ -39,11 +49,6 @@ Every change is logged and reversible. Full backup before any modifications. Dry
 ## How It Works
 
 Posts are exported locally and split into batches. Parallel AI agents analyze the full content of every post and suggest optimal categories. Results are aggregated, reviewed with you, and applied via WP-CLI or REST API.
-
-## Requirements
-
-- [Claude Code](https://claude.ai/code)
-- A WordPress site you have admin access to
 
 ## License
 
