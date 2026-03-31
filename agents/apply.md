@@ -148,9 +148,9 @@ curl -X POST -H 'Authorization: Bearer TOKEN' \
 
 ## Revert
 
-To revert changes, read the backup file and restore every post to its original categories:
-```php
-// Read backup JSON, for each post:
-wp_set_post_categories($post_id, $original_cat_ids);
+**You MUST use `lib/restore.php` for reverting changes. Do not write inline PHP loops.** The restore script handles recreating deleted terms, resolving parent hierarchy, fixing name collisions, restoring the default category setting, and flushing caches.
+
+```bash
+# Perform a full authoritative restore from a backup file
+TAXONOMIST_BACKUP=/path/to/data/backups/backup-{timestamp}.json wp eval-file lib/restore.php
 ```
-For deleted terms, recreate them first, then restore post assignments.
