@@ -26,9 +26,8 @@ This is a Claude Code tool. Users download this repo, open it with Claude Code, 
 2. **Export** — Download all posts (full content) and categories locally
 3. **Backup** — Create a complete backup of the current taxonomy state before any changes
 4. **Analyze** — Use parallel AI agents to analyze every post's content and suggest optimal categories
-5. **Plan** — Present findings: category usage stats, suggested merges/retirements/new categories
-6. **Descriptions** — Write or improve descriptions for every category (existing and new) based on what we learned analyzing posts. Present to user for review.
-7. **Review** — Iterate with the user until the full plan (categories + descriptions) is right
+5. **Plan & Descriptions** — Present findings in a single table showing every category with current description and recommended description side by side (see format below). Include suggested merges, retirements, and new categories.
+6. **Review** — Iterate with the user until the full plan (categories + descriptions) is right
 8. **Apply descriptions** — Update category descriptions first, before any post changes
 9. **Apply categories** — Execute post category changes via WP-CLI or REST API, logging every single change
 10. **Verify** — Confirm the site still works and categories look correct
@@ -178,7 +177,31 @@ Use what you learned from analyzing posts to write descriptions that reflect the
 3. Improve existing descriptions that are empty, vague, or outdated
 4. The description should help readers understand what they'll find, not just restate the category name
 
-Present ALL descriptions (existing and new) to the user for review. Apply approved descriptions before making any post changes:
+### Presentation Format
+
+Present the plan and descriptions together as a single table so the user can see everything at once:
+
+```
+┌──────────────────┬───────┬──────────────────────────┬──────────────────────────────────────┐
+│     Category     │ Posts │   Current Description    │       Recommended Description        │
+├──────────────────┼───────┼──────────────────────────┼──────────────────────────────────────┤
+│ happiness        │ 49    │ (none)                   │ The Happiness Engineer role —         │
+│ engineering      │       │                          │ what it is, how it works, and why    │
+│                  │       │                          │ it matters.                          │
+├──────────────────┼───────┼──────────────────────────┼──────────────────────────────────────┤
+│ remote work      │ 13    │ (none)                   │ Working from anywhere — schedules,   │
+│                  │       │                          │ nomad life, and distributed teams.   │
+├──────────────────┼───────┼──────────────────────────┼──────────────────────────────────────┤
+│ a day in the     │ 11    │ a day in the life of an  │ A day in the life of an Automattic   │
+│ life             │       │ Automattic HE            │ Happiness Engineer — routines,       │
+│                  │       │                          │ tools, and workflows.                │
+├──────────────────┼───────┼──────────────────────────┼──────────────────────────────────────┤
+│ Archived         │ 1     │ (none)                   │ ⚠️  Retire — reassign post to        │
+│                  │       │                          │ a real category first.               │
+└──────────────────┴───────┴──────────────────────────┴──────────────────────────────────────┘
+```
+
+This lets the user approve descriptions alongside the category plan in one step. Apply approved descriptions before making any post changes:
 
 ```bash
 wp term update TERM_ID category --description="Description text here"
