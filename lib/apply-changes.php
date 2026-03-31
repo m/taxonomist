@@ -3,6 +3,9 @@
  * Apply category changes from an AI-generated suggestions file.
  *
  * Reads a JSON file of per-post category suggestions and applies them.
+ * Categories are resolved by **slug** (not display name) to prevent
+ * drift between the export/analysis and apply phases.
+ *
  * The merge strategy is additive: suggested categories are added to
  * existing ones, and only categories listed in TAXONOMIST_REMOVE_CATS
  * are removed. This preserves manually-assigned categories while layering
@@ -16,7 +19,8 @@
  *
  * Environment variables:
  *   TAXONOMIST_SUGGESTIONS  Path to the suggestions JSON file. Required.
- *                           Format: [{"id": 123, "cats": ["Tech", "AI"]}, ...]
+ *                           Format: [{"id": 123, "cats": ["WordPress", "ai"]}, ...]
+ *                           Values in "cats" are category slugs.
  *   TAXONOMIST_LOG          Path for the change log TSV.
  *                           Default: /tmp/taxonomist-changes.tsv
  *   TAXONOMIST_MODE         "preview" (default) shows what would change.
@@ -46,33 +50,58 @@ if ( ! $suggestions ) {
 	WP_CLI::error( 'Failed to parse suggestions file' );
 }
 
-// Build a case-insensitive lookup from category name to term ID.
-// This handles minor casing differences between suggestions and WordPress.
-$all_cats   = get_terms(
+// Build a slug-to-term-ID lookup. Slugs are the stable identifier that
+// survives renames and is consistent across export, analysis, and apply.
+$all_cats     = get_terms(
 	array(
 		'taxonomy'   => 'category',
 		'hide_empty' => false,
 	)
 );
-$cat_lookup = array();
+$slug_to_id   = array();
+$slug_to_name = array();
 foreach ( $all_cats as $t ) {
-	$cat_lookup[ strtolower( $t->name ) ] = $t->term_id;
+	$slug_to_id[ $t->slug ]   = $t->term_id;
+	$slug_to_name[ $t->slug ] = $t->name;
 }
 
-// Parse the list of category slugs to strip from posts when new
-// categories are assigned (e.g., removing "Asides" once a real
-// category is applied).
+// Also build a case-insensitive name-to-slug fallback for suggestions
+// that were generated with names instead of slugs (legacy compatibility).
+$name_to_slug = array();
+foreach ( $all_cats as $t ) {
+	$name_to_slug[ strtolower( $t->name ) ] = $t->slug;
+}
+
+// Parse the list of category slugs to strip from posts.
 $remove_slugs = array_filter( array_map( 'trim', explode( ',', $remove_cats_str ) ) );
 $remove_ids   = array();
 foreach ( $remove_slugs as $slug ) {
-	$found_term = get_term_by( 'slug', $slug, 'category' );
-	if ( $found_term ) {
-		$remove_ids[] = $found_term->term_id;
+	if ( isset( $slug_to_id[ $slug ] ) ) {
+		$remove_ids[] = $slug_to_id[ $slug ];
 	}
 }
 
-// Open the change log. Every modification is recorded here so the
-// changes can be reviewed or reverted later.
+// Pre-flight check: verify all suggested slugs exist in the live taxonomy.
+// Abort early if there are unresolved references — this prevents silent
+// data loss from taxonomy drift between export and apply.
+$unresolved = array();
+foreach ( $suggestions as $suggestion ) {
+	$suggested_refs = isset( $suggestion['cats'] ) ? $suggestion['cats'] : array();
+	foreach ( $suggested_refs as $ref ) {
+		if ( ! isset( $slug_to_id[ $ref ] ) && ! isset( $name_to_slug[ strtolower( $ref ) ] ) ) {
+			$unresolved[ $ref ] = true;
+		}
+	}
+}
+if ( ! empty( $unresolved ) ) {
+	$list = implode( ', ', array_keys( $unresolved ) );
+	WP_CLI::error(
+		"Taxonomy drift detected: these categories from the suggestions do not exist in the live site: $list. " .
+		'Re-export and re-analyze, or create the missing categories first.'
+	);
+}
+
+// Open the change log.
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fclose
@@ -85,10 +114,9 @@ $error_count = 0;
 
 foreach ( $suggestions as $suggestion ) {
 	$current_post_id = $suggestion['id'];
-	$suggested_names = isset( $suggestion['cats'] ) ? $suggestion['cats'] : array();
+	$suggested_refs  = isset( $suggestion['cats'] ) ? $suggestion['cats'] : array();
 
-	// Skip posts with no suggestions — nothing to do.
-	if ( empty( $suggested_names ) ) {
+	if ( empty( $suggested_refs ) ) {
 		++$skipped;
 		continue;
 	}
@@ -99,7 +127,7 @@ foreach ( $suggestions as $suggestion ) {
 		continue;
 	}
 
-	// Snapshot the current category state for logging.
+	// Snapshot current state for logging.
 	$current_ids   = wp_get_post_categories( $current_post_id );
 	$current_names = array();
 	foreach ( $current_ids as $cid ) {
@@ -110,7 +138,6 @@ foreach ( $suggestions as $suggestion ) {
 	}
 
 	// Keep current categories except those in the remove list.
-	// This preserves any manually-assigned categories.
 	$kept_ids = array();
 	foreach ( $current_ids as $cid ) {
 		if ( ! in_array( $cid, $remove_ids, true ) ) {
@@ -118,22 +145,23 @@ foreach ( $suggestions as $suggestion ) {
 		}
 	}
 
-	// Resolve suggestion names to term IDs via case-insensitive lookup.
+	// Resolve suggestions to term IDs. Try slug first, fall back to name.
 	$suggested_ids = array();
-	foreach ( $suggested_names as $name ) {
-		$key = strtolower( $name );
-		if ( isset( $cat_lookup[ $key ] ) ) {
-			$suggested_ids[] = $cat_lookup[ $key ];
+	foreach ( $suggested_refs as $ref ) {
+		if ( isset( $slug_to_id[ $ref ] ) ) {
+			$suggested_ids[] = $slug_to_id[ $ref ];
+		} elseif ( isset( $name_to_slug[ strtolower( $ref ) ] ) ) {
+			$suggested_ids[] = $slug_to_id[ $name_to_slug[ strtolower( $ref ) ] ];
 		}
 	}
 
-	// Merge: union of kept existing categories and new suggestions.
+	// Merge: union of kept existing + new suggestions.
 	$new_ids = array_values( array_unique( array_merge( array_values( $kept_ids ), $suggested_ids ) ) );
 	if ( empty( $new_ids ) ) {
 		continue;
 	}
 
-	// Skip if nothing actually changed (same categories before and after).
+	// Skip if nothing changed.
 	$sorted_current = $current_ids;
 	$sorted_new     = $new_ids;
 	sort( $sorted_current );
@@ -143,7 +171,7 @@ foreach ( $suggestions as $suggestion ) {
 		continue;
 	}
 
-	// Calculate the diff for the change log.
+	// Calculate diff for the log.
 	$added_ids   = array_diff( $new_ids, $current_ids );
 	$removed_ids = array_diff( $current_ids, $new_ids );
 
@@ -168,7 +196,7 @@ foreach ( $suggestions as $suggestion ) {
 		}
 	}
 
-	// Write the change to the log before applying it.
+	// Write the change to the log before applying.
 	$ts         = gmdate( 'Y-m-d H:i:s' );
 	$post_title = str_replace( "\t", ' ', $current_post->post_title );
 	fwrite(
@@ -180,7 +208,6 @@ foreach ( $suggestions as $suggestion ) {
 		implode( '|', $removed_names ) . "\n"
 	);
 
-	// Only write to the database in "apply" mode.
 	if ( 'apply' === $apply_mode ) {
 		wp_set_post_categories( $current_post_id, $new_ids );
 	}

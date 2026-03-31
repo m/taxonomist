@@ -56,8 +56,11 @@ $total = count( $all_posts );
 $i     = 0;
 
 foreach ( $all_posts as $p ) {
-	// Get category names (not IDs) for human-readable output.
-	$cats = wp_get_post_categories( $p->ID, array( 'fields' => 'names' ) );
+	// Get both category names (for AI analysis readability) and slugs
+	// (as stable identifiers that survive renames). The apply script
+	// resolves suggestions by slug, not name, to prevent drift.
+	$cat_names = wp_get_post_categories( $p->ID, array( 'fields' => 'names' ) );
+	$cat_slugs = wp_get_post_categories( $p->ID, array( 'fields' => 'slugs' ) );
 
 	// Strip HTML and collapse whitespace for clean plain-text content.
 	// Full content is preserved (not truncated) for accurate AI analysis.
@@ -67,12 +70,13 @@ foreach ( $all_posts as $p ) {
 
 	$row = wp_json_encode(
 		array(
-			'id'         => $p->ID,
-			'title'      => html_entity_decode( $p->post_title, ENT_QUOTES, 'UTF-8' ),
-			'date'       => $p->post_date,
-			'content'    => $content,
-			'categories' => array_values( $cats ),
-			'url'        => get_permalink( $p->ID ),
+			'id'             => $p->ID,
+			'title'          => html_entity_decode( $p->post_title, ENT_QUOTES, 'UTF-8' ),
+			'date'           => $p->post_date,
+			'content'        => $content,
+			'categories'     => array_values( $cat_names ),
+			'category_slugs' => array_values( $cat_slugs ),
+			'url'            => get_permalink( $p->ID ),
 		)
 	);
 

@@ -81,13 +81,19 @@ foreach ( $all_posts as $p ) {
 	);
 }
 
+// Capture the default category setting so restore can reset it.
+$default_cat_id   = (int) get_option( 'default_category' );
+$default_cat_term = get_term( $default_cat_id, 'category' );
+$default_cat_slug = $default_cat_term ? $default_cat_term->slug : '';
+
 $backup = array(
-	'timestamp'        => gmdate( 'Y-m-d H:i:s' ),
-	'site_url'         => get_site_url(),
-	'total_posts'      => count( $post_cats ),
-	'total_categories' => count( $term_data ),
-	'categories'       => $term_data,
-	'post_categories'  => $post_cats,
+	'timestamp'             => gmdate( 'Y-m-d H:i:s' ),
+	'site_url'              => get_site_url(),
+	'total_posts'           => count( $post_cats ),
+	'total_categories'      => count( $term_data ),
+	'default_category_slug' => $default_cat_slug,
+	'categories'            => $term_data,
+	'post_categories'       => $post_cats,
 );
 
 file_put_contents( $output_file, wp_json_encode( $backup, JSON_PRETTY_PRINT ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents

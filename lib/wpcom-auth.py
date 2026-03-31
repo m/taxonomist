@@ -113,10 +113,6 @@ def main():
         server.timeout = 2
         print(f"Listening on localhost:{port} for OAuth callback...", file=sys.stderr)
 
-        # WordPress.com registered redirect is http://localhost (no port).
-        # For native apps it should follow the redirect regardless of port,
-        # but we use the base URI in the auth URL to match the registration.
-
     # Open the browser.
     print("Opening WordPress.com authorization page...", file=sys.stderr)
     webbrowser.open(auth_url)
@@ -129,19 +125,19 @@ def main():
 
         server.server_close()
 
-    # If the local server didn't catch it (redirect went to port 80),
-    # ask the user to paste the code.
+    # If the local server didn't catch the redirect, ask the user to
+    # paste the code from their browser's URL bar.
     if not auth_code:
         print(
-            "\nThe redirect may have failed because nothing is running on port 80.",
+            "\nThe redirect didn't reach the local server.",
             file=sys.stderr,
         )
         print(
-            "Look at your browser's URL bar — it should show something like:",
+            "Check your browser's URL bar — it should show something like:",
             file=sys.stderr,
         )
         print(
-            "  http://localhost/?code=XXXXXXXXXX",
+            f"  http://localhost:{LISTEN_PORT}/?code=XXXXXXXXXX",
             file=sys.stderr,
         )
         print(file=sys.stderr)

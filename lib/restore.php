@@ -2,12 +2,19 @@
 /**
  * Restore taxonomy state from a backup file.
  *
- * Reads a backup JSON created by backup.php and restores the exact
- * category state: recreates any categories that were deleted, then
- * sets every post's categories back to their original assignments.
+ * Performs a full authoritative restore: the category taxonomy after this
+ * script runs will exactly match the backup. This means:
  *
- * Uses category slugs (not IDs) for matching, since term IDs may change
- * when categories are deleted and recreated.
+ * 1. Recreate any categories that were deleted since the backup.
+ * 2. Update existing categories to match backup values (name, slug, description).
+ * 3. Restore parent-child hierarchy using a two-pass approach (parents first).
+ * 4. Restore every post's category assignments.
+ * 5. Delete any categories that were created after the backup.
+ * 6. Restore the default_category setting.
+ * 7. Recount term usage.
+ *
+ * Uses category slugs (not IDs) as the stable identifier, since term IDs
+ * may change when categories are deleted and recreated.
  *
  * Usage:
  *   TAXONOMIST_BACKUP=/path/to/backup.json wp eval-file restore.php
@@ -32,42 +39,111 @@ if ( ! $backup ) {
 WP_CLI::log( 'Restoring from backup: ' . $backup['timestamp'] );
 WP_CLI::log( 'Posts: ' . $backup['total_posts'] . ', Categories: ' . $backup['total_categories'] );
 
-// Step 1: Recreate any categories that were deleted since the backup.
-// Build a slug-to-ID map of currently existing categories, then fill in
-// gaps from the backup data.
-$existing_slugs = array();
-$existing_terms = get_terms(
+// Build a set of slugs that should exist after restore.
+$backup_slugs = array();
+// Map old term_id -> slug for resolving parent references.
+$old_id_to_slug = array();
+foreach ( $backup['categories'] as $category ) {
+	$backup_slugs[ $category['slug'] ]      = $category;
+	$old_id_to_slug[ $category['term_id'] ] = $category['slug'];
+}
+
+// Step 1: Recreate missing categories and update existing ones.
+// First pass: create/update without parents (avoids dependency issues).
+$existing_terms   = get_terms(
 	array(
 		'taxonomy'   => 'category',
 		'hide_empty' => false,
 	)
 );
+$existing_by_slug = array();
 foreach ( $existing_terms as $t ) {
-	$existing_slugs[ $t->slug ] = $t->term_id;
+	$existing_by_slug[ $t->slug ] = $t;
 }
 
-$slug_to_id = $existing_slugs;
+$slug_to_id = array();
+$created    = 0;
+$updated    = 0;
+
 foreach ( $backup['categories'] as $category ) {
-	if ( ! isset( $existing_slugs[ $category['slug'] ] ) ) {
+	$slug = $category['slug'];
+
+	if ( isset( $existing_by_slug[ $slug ] ) ) {
+		// Category exists — update its name, description to match backup.
+		$existing     = $existing_by_slug[ $slug ];
+		$needs_update = (
+			$existing->name !== $category['name'] ||
+			$existing->description !== $category['description']
+		);
+		if ( $needs_update ) {
+			wp_update_term(
+				$existing->term_id,
+				'category',
+				array(
+					'name'        => $category['name'],
+					'description' => $category['description'],
+				)
+			);
+			++$updated;
+			WP_CLI::log( 'Updated category: ' . $category['name'] );
+		}
+		$slug_to_id[ $slug ] = $existing->term_id;
+	} else {
+		// Category was deleted — recreate it (without parent for now).
 		$result = wp_insert_term(
 			$category['name'],
 			'category',
 			array(
 				'slug'        => $category['slug'],
 				'description' => $category['description'],
-				'parent'      => $category['parent'],
 			)
 		);
 		if ( ! is_wp_error( $result ) ) {
-			$slug_to_id[ $category['slug'] ] = $result['term_id'];
-			WP_CLI::log( 'Recreated category: ' . $category['name'] . ' (was term_id ' . $category['term_id'] . ')' );
+			$slug_to_id[ $slug ] = $result['term_id'];
+			++$created;
+			WP_CLI::log( 'Recreated category: ' . $category['name'] );
 		} else {
 			WP_CLI::warning( 'Failed to recreate ' . $category['name'] . ': ' . $result->get_error_message() );
 		}
 	}
 }
 
-// Step 2: Restore every post's categories by resolving slugs to current IDs.
+// Step 2: Restore parent-child hierarchy.
+// Now that all terms exist, set parents using the old_id -> slug -> new_id mapping.
+$hierarchy_fixed = 0;
+foreach ( $backup['categories'] as $category ) {
+	$slug       = $category['slug'];
+	$old_parent = $category['parent'];
+
+	if ( ! isset( $slug_to_id[ $slug ] ) ) {
+		continue;
+	}
+
+	$current_id       = $slug_to_id[ $slug ];
+	$target_parent_id = 0;
+
+	if ( $old_parent > 0 && isset( $old_id_to_slug[ $old_parent ] ) ) {
+		$parent_slug = $old_id_to_slug[ $old_parent ];
+		if ( isset( $slug_to_id[ $parent_slug ] ) ) {
+			$target_parent_id = $slug_to_id[ $parent_slug ];
+		} else {
+			WP_CLI::warning( "Parent slug '$parent_slug' not found for category '$slug'" );
+		}
+	}
+
+	// Check if parent needs updating.
+	$current_term = get_term( $current_id, 'category' );
+	if ( $current_term && (int) $current_term->parent !== $target_parent_id ) {
+		wp_update_term( $current_id, 'category', array( 'parent' => $target_parent_id ) );
+		++$hierarchy_fixed;
+	}
+}
+
+if ( $hierarchy_fixed > 0 ) {
+	WP_CLI::log( "Fixed $hierarchy_fixed parent-child relationships." );
+}
+
+// Step 3: Restore every post's categories.
 $restored    = 0;
 $error_count = 0;
 foreach ( $backup['post_categories'] as $pc ) {
@@ -79,14 +155,13 @@ foreach ( $backup['post_categories'] as $pc ) {
 			$target_ids[] = $slug_to_id[ $slug ];
 		} else {
 			WP_CLI::warning( "Category slug '$slug' not found for post $current_post_id" );
+			++$error_count;
 		}
 	}
 
 	if ( ! empty( $target_ids ) ) {
 		wp_set_post_categories( $current_post_id, $target_ids );
 		++$restored;
-	} else {
-		++$error_count;
 	}
 
 	if ( 0 === $restored % 500 && $restored > 0 ) {
@@ -94,7 +169,47 @@ foreach ( $backup['post_categories'] as $pc ) {
 	}
 }
 
-// Step 3: Recount term usage to fix any stale counts.
+// Step 4: Delete categories that were created after the backup.
+// Refresh the term list and remove any slug not in the backup.
+$post_restore_terms = get_terms(
+	array(
+		'taxonomy'   => 'category',
+		'hide_empty' => false,
+	)
+);
+$deleted            = 0;
+foreach ( $post_restore_terms as $t ) {
+	if ( ! isset( $backup_slugs[ $t->slug ] ) ) {
+		// Don't delete the default category — change it first if needed.
+		$default_cat = (int) get_option( 'default_category' );
+		if ( $t->term_id === $default_cat ) {
+			// Find a backup category to use as default instead.
+			$first_backup_slug = array_key_first( $backup_slugs );
+			if ( $first_backup_slug && isset( $slug_to_id[ $first_backup_slug ] ) ) {
+				update_option( 'default_category', $slug_to_id[ $first_backup_slug ] );
+			}
+		}
+		wp_delete_term( $t->term_id, 'category' );
+		WP_CLI::log( 'Deleted post-backup category: ' . $t->name );
+		++$deleted;
+	}
+}
+
+// Step 5: Restore the default_category setting.
+// The backup stores the old term_id — resolve via slug.
+if ( isset( $backup['default_category_slug'] ) ) {
+	$default_slug = $backup['default_category_slug'];
+	if ( isset( $slug_to_id[ $default_slug ] ) ) {
+		update_option( 'default_category', $slug_to_id[ $default_slug ] );
+		WP_CLI::log( 'Restored default category: ' . $default_slug );
+	}
+}
+
+// Step 6: Recount term usage to fix any stale counts.
 WP_CLI::runcommand( 'term recount category' );
 
-WP_CLI::success( "Restored $restored posts. Errors: $error_count" );
+WP_CLI::success(
+	"Restored $restored posts. " .
+	"Created $created categories, updated $updated, deleted $deleted. " .
+	"Errors: $error_count."
+);
