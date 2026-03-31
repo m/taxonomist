@@ -29,7 +29,10 @@ import urllib.request
 import webbrowser
 
 CLIENT_ID = "136301"
-CLIENT_SECRET = "Vy27l7cBxu3h42mdhK536QXVQgedeIlte3JAXS2FsqDv0yJf9xoRMIObcogWcUVv"  # Native app — intentionally public per OAuth spec
+# Client secret is optional for native apps on WordPress.com.
+# If set via env var, it will be included in the token exchange.
+# If not set, the exchange still works — WP.com treats it as optional.
+CLIENT_SECRET = os.environ.get("WPCOM_CLIENT_SECRET")
 LISTEN_PORT = 19823
 REDIRECT_URI = f"http://localhost:{LISTEN_PORT}"
 TIMEOUT = 120  # seconds to wait for user to authorize
@@ -49,13 +52,16 @@ def check_port_available(port):
 
 def exchange_code(code):
     """Exchange an authorization code for a bearer token."""
-    data = urllib.parse.urlencode({
+    params = {
         "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": REDIRECT_URI,
-    }).encode()
+    }
+    # Only include client_secret if set — sending empty string causes 400.
+    if CLIENT_SECRET:
+        params["client_secret"] = CLIENT_SECRET
+    data = urllib.parse.urlencode(params).encode()
 
     req = urllib.request.Request(
         "https://public-api.wordpress.com/oauth2/token",

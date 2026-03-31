@@ -98,9 +98,9 @@ Test: `curl -s -d '<?xml version="1.0"?><methodCall><methodName>wp.getCategories
 
 Taxonomist is registered as a WordPress.com OAuth2 app. Users do NOT need to register their own.
 
-**Credentials (embedded — safe for native/CLI apps per OAuth spec):**
+**Credentials:**
 - Client ID: `136301`
-- Client Secret: `Vy27l7cBxu3h42mdhK536QXVQgedeIlte3JAXS2FsqDv0yJf9xoRMIObcogWcUVv` (native app — intentionally public per OAuth spec, same as GitHub CLI)
+- Client Secret: not required (WordPress.com treats it as optional for native apps)
 
 **Detection:** Check if the site is on WordPress.com (`*.wordpress.com`) or has Jetpack:
 - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` (returns site info if accessible)
