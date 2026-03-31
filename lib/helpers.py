@@ -49,8 +49,8 @@ def wp_urlencode(params):
                 flatten(v, new_prefix)
         elif isinstance(obj, list):
             for v in obj:
-                # Add [] to the key for list items.
-                flattened.append((f'{prefix}[]', v))
+                # Recurse for list items to handle nested structures (key[][subkey]).
+                flatten(v, f'{prefix}[]')
         else:
             flattened.append((prefix, str(obj)))
 
