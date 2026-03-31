@@ -62,6 +62,16 @@ Test: `ssh {user}@{host} "wp --path={wp_path} {flags} option get blogname"`
 Test: `wp --path={wp_path} option get blogname`
 
 ### REST API + Application Password
+
+For **self-hosted WordPress** sites (not WordPress.com), Application Passwords are built into WordPress 5.6+. Guide the user:
+
+1. Go to **Users → Profile** in wp-admin
+2. Scroll to "Application Passwords"
+3. Enter "Taxonomist" as the name and click "Add New Application Password"
+4. Copy the generated password and paste it here in the chat
+
+For **WordPress.com** sites, Application Passwords require Two-Step Authentication to be enabled first. Use the OAuth flow instead (see WordPress.com section below).
+
 ```json
 {
   "site_url": "https://example.com",
@@ -72,7 +82,6 @@ Test: `wp --path={wp_path} option get blogname`
   }
 }
 ```
-Guide user: Users → Profile → Application Passwords → create one named "Taxonomist"
 Test: `curl -s -u {username}:{app_password} {url}/wp-json/wp/v2/categories?per_page=1`
 
 ### REST API + JWT
@@ -113,55 +122,19 @@ Taxonomist is registered as a WordPress.com OAuth2 app. Users do NOT need to reg
 - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` (returns site info if accessible)
 - `curl -s {url}/wp-json/jetpack/v4/module` (Jetpack present on self-hosted)
 
-**Getting a token (authorization code flow with local server):**
+**Getting a token (use the provided auth script):**
 
-1. Start a temporary local HTTP server to catch the OAuth redirect:
-
-```python
-python3 -c "
-import http.server, urllib.parse, json
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-        code = q.get('code', [''])[0]
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'Authorization complete! You can close this tab.')
-        with open('/tmp/taxonomist-auth-code.txt', 'w') as f:
-            f.write(code)
-        raise KeyboardInterrupt
-    def log_message(self, *a): pass
-try: http.server.HTTPServer(('localhost', 80), H).serve_forever()
-except KeyboardInterrupt: pass
-" &
-```
-
-If port 80 is unavailable, use another port — but the redirect URI registered for the app is `http://localhost` (port 80). Alternatively, tell the user to copy the `?code=` value from the URL bar if the redirect fails.
-
-2. Open the authorization URL in the user's browser:
+Run the auth helper which starts a local server on port 19823, opens the browser, and captures the token automatically:
 
 ```bash
-open "https://public-api.wordpress.com/oauth2/authorize?client_id=136301&redirect_uri=http://localhost&response_type=code&scope=global"
+python3 lib/wpcom-auth.py
 ```
 
-3. User clicks "Approve" in their browser. The redirect hits the local server, which captures the auth code.
+The script prints the token to stdout. Capture it and save to config.json. The user just clicks "Approve" in their browser — no manual copying needed.
 
-4. Exchange the code for a token:
+If the local server can't bind (port in use), the script falls back to asking the user to paste the code from their browser URL bar.
 
-```bash
-curl -s -X POST https://public-api.wordpress.com/oauth2/token \
-  -d client_id=136301 \
-  -d "client_secret=Vy27l7cBxu3h42mdhK536QXVQgedeIlte3JAXS2FsqDv0yJf9xoRMIObcogWcUVv" \
-  -d grant_type=authorization_code \
-  -d "code=AUTH_CODE" \
-  -d "redirect_uri=http://localhost"
-```
-
-Response: `{"access_token": "TOKEN", "blog_id": "...", "token_type": "bearer"}`
-
-**Fallback if the local server doesn't work:** Tell the user to copy the `code` parameter from the URL bar after the redirect fails (it will show `http://localhost/?code=XXXXX`). Then exchange that code manually.
-
-4. Save to config:
+Save to config:
 ```json
 {
   "site_url": "https://example.wordpress.com",
@@ -175,7 +148,7 @@ Response: `{"access_token": "TOKEN", "blog_id": "...", "token_type": "bearer"}`
 
 **Site ID:** Can be the numeric blog_id from the token response, or the domain (e.g., `example.wordpress.com`).
 
-**Scopes:** The password grant provides full access to the user's sites. No scope parameter needed.
+**Scopes:** The token has global scope and works for any site the user has access to.
 
 Test: `curl -s -H 'Authorization: Bearer TOKEN' 'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories?number=5'`
 
