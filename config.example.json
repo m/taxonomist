@@ -1,0 +1,10 @@
+{
+  "site_url": "https://example.com",
+  "connection": {
+    "method": "wp-cli-ssh",
+    "ssh_user": "root",
+    "ssh_host": "example.com",
+    "wp_path": "/var/www/html",
+    "wp_cli_flags": "--allow-root"
+  }
+}
