@@ -13,7 +13,7 @@ if ( ! $backup_file || ! file_exists( $backup_file ) ) {
 	WP_CLI::error( 'Set TAXONOMIST_BACKUP env var to the backup file path' );
 }
 
-$backup = json_decode( file_get_contents( $backup_file ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_get_contents
+$backup = json_decode( file_get_contents( $backup_file ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file
 if ( ! $backup ) {
 	WP_CLI::error( 'Failed to parse backup file' );
 }
@@ -34,46 +34,46 @@ foreach ( $existing_terms as $t ) {
 }
 
 $slug_to_id = $existing_slugs;
-foreach ( $backup['categories'] as $cat ) {
-	if ( ! isset( $existing_slugs[ $cat['slug'] ] ) ) {
+foreach ( $backup['categories'] as $category ) {
+	if ( ! isset( $existing_slugs[ $category['slug'] ] ) ) {
 		$result = wp_insert_term(
-			$cat['name'],
+			$category['name'],
 			'category',
 			array(
-				'slug'        => $cat['slug'],
-				'description' => $cat['description'],
-				'parent'      => $cat['parent'],
+				'slug'        => $category['slug'],
+				'description' => $category['description'],
+				'parent'      => $category['parent'],
 			)
 		);
 		if ( ! is_wp_error( $result ) ) {
-			$slug_to_id[ $cat['slug'] ] = $result['term_id'];
-			WP_CLI::log( 'Recreated category: ' . $cat['name'] . ' (was term_id ' . $cat['term_id'] . ')' );
+			$slug_to_id[ $category['slug'] ] = $result['term_id'];
+			WP_CLI::log( 'Recreated category: ' . $category['name'] . ' (was term_id ' . $category['term_id'] . ')' );
 		} else {
-			WP_CLI::warning( 'Failed to recreate ' . $cat['name'] . ': ' . $result->get_error_message() );
+			WP_CLI::warning( 'Failed to recreate ' . $category['name'] . ': ' . $result->get_error_message() );
 		}
 	}
 }
 
 // Step 2: Restore every post's categories.
-$restored = 0;
-$errors   = 0;
+$restored    = 0;
+$error_count = 0;
 foreach ( $backup['post_categories'] as $pc ) {
-	$post_id    = $pc['post_id'];
-	$target_ids = array();
+	$current_post_id = $pc['post_id'];
+	$target_ids      = array();
 
 	foreach ( $pc['category_slugs'] as $slug ) {
 		if ( isset( $slug_to_id[ $slug ] ) ) {
 			$target_ids[] = $slug_to_id[ $slug ];
 		} else {
-			WP_CLI::warning( "Category slug '$slug' not found for post $post_id" );
+			WP_CLI::warning( "Category slug '$slug' not found for post $current_post_id" );
 		}
 	}
 
 	if ( ! empty( $target_ids ) ) {
-		wp_set_post_categories( $post_id, $target_ids );
+		wp_set_post_categories( $current_post_id, $target_ids );
 		++$restored;
 	} else {
-		++$errors;
+		++$error_count;
 	}
 
 	if ( 0 === $restored % 500 && $restored > 0 ) {
@@ -84,4 +84,4 @@ foreach ( $backup['post_categories'] as $pc ) {
 // Step 3: Recount.
 WP_CLI::runcommand( 'term recount category' );
 
-WP_CLI::success( "Restored $restored posts. Errors: $errors" );
+WP_CLI::success( "Restored $restored posts. Errors: $error_count" );

@@ -4,3 +4,4 @@ __pycache__/
 .claude/
 data/
 config.json
+vendor/

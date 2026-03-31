@@ -10,10 +10,13 @@
 
 $output_file = getenv( 'TAXONOMIST_OUTPUT' ) ? getenv( 'TAXONOMIST_OUTPUT' ) : '/tmp/taxonomist-export.json';
 
+// phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+// phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+// phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 $fp = fopen( $output_file, 'w' );
 fwrite( $fp, "[\n" );
 
-$posts = get_posts(
+$all_posts = get_posts(
 	array(
 		'numberposts' => -1,
 		'post_status' => 'publish',
@@ -23,10 +26,10 @@ $posts = get_posts(
 	)
 );
 
-$total = count( $posts );
+$total = count( $all_posts );
 $i     = 0;
 
-foreach ( $posts as $p ) {
+foreach ( $all_posts as $p ) {
 	$cats    = wp_get_post_categories( $p->ID, array( 'fields' => 'names' ) );
 	$content = wp_strip_all_tags( $p->post_content );
 	$content = preg_replace( '/\s+/', ' ', $content );
@@ -56,4 +59,5 @@ foreach ( $posts as $p ) {
 
 fwrite( $fp, "\n]" );
 fclose( $fp );
+// phpcs:enable
 WP_CLI::success( "Exported $total posts to $output_file" );

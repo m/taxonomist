@@ -15,14 +15,14 @@
 
 $suggestions_file = getenv( 'TAXONOMIST_SUGGESTIONS' );
 $log_file         = getenv( 'TAXONOMIST_LOG' ) ? getenv( 'TAXONOMIST_LOG' ) : '/tmp/taxonomist-changes.tsv';
-$mode             = getenv( 'TAXONOMIST_MODE' ) ? getenv( 'TAXONOMIST_MODE' ) : 'preview';
+$apply_mode       = getenv( 'TAXONOMIST_MODE' ) ? getenv( 'TAXONOMIST_MODE' ) : 'preview';
 $remove_cats_str  = getenv( 'TAXONOMIST_REMOVE_CATS' ) ? getenv( 'TAXONOMIST_REMOVE_CATS' ) : '';
 
 if ( ! $suggestions_file || ! file_exists( $suggestions_file ) ) {
 	WP_CLI::error( 'Set TAXONOMIST_SUGGESTIONS to the suggestions JSON path' );
 }
 
-$suggestions = json_decode( file_get_contents( $suggestions_file ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_get_contents
+$suggestions = json_decode( file_get_contents( $suggestions_file ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file
 if ( ! $suggestions ) {
 	WP_CLI::error( 'Failed to parse suggestions file' );
 }
@@ -43,34 +43,37 @@ foreach ( $all_cats as $t ) {
 $remove_slugs = array_filter( array_map( 'trim', explode( ',', $remove_cats_str ) ) );
 $remove_ids   = array();
 foreach ( $remove_slugs as $slug ) {
-	$term = get_term_by( 'slug', $slug, 'category' );
-	if ( $term ) {
-		$remove_ids[] = $term->term_id;
+	$found_term = get_term_by( 'slug', $slug, 'category' );
+	if ( $found_term ) {
+		$remove_ids[] = $found_term->term_id;
 	}
 }
 
+// phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fopen
+// phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
+// phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 $log = fopen( $log_file, 'w' );
 fwrite( $log, "timestamp\taction\tpost_id\tpost_title\told_categories\tnew_categories\tcats_added\tcats_removed\n" );
 
-$changes = 0;
-$skipped = 0;
-$errors  = 0;
+$changes     = 0;
+$skipped     = 0;
+$error_count = 0;
 
-foreach ( $suggestions as $s ) {
-	$post_id         = $s['id'];
-	$suggested_names = isset( $s['cats'] ) ? $s['cats'] : array();
+foreach ( $suggestions as $suggestion ) {
+	$current_post_id = $suggestion['id'];
+	$suggested_names = isset( $suggestion['cats'] ) ? $suggestion['cats'] : array();
 	if ( empty( $suggested_names ) ) {
 		++$skipped;
 		continue;
 	}
 
-	$post = get_post( $post_id );
-	if ( ! $post ) {
-		++$errors;
+	$current_post = get_post( $current_post_id );
+	if ( ! $current_post ) {
+		++$error_count;
 		continue;
 	}
 
-	$current_ids   = wp_get_post_categories( $post_id );
+	$current_ids   = wp_get_post_categories( $current_post_id );
 	$current_names = array();
 	foreach ( $current_ids as $cid ) {
 		$t = get_term( $cid, 'category' );
@@ -137,19 +140,19 @@ foreach ( $suggestions as $s ) {
 		}
 	}
 
-	$ts    = gmdate( 'Y-m-d H:i:s' );
-	$title = str_replace( "\t", ' ', $post->post_title );
+	$ts         = gmdate( 'Y-m-d H:i:s' );
+	$post_title = str_replace( "\t", ' ', $current_post->post_title );
 	fwrite(
 		$log,
-		"$ts\tSET_CATS\t$post_id\t$title\t" .
+		"$ts\tSET_CATS\t$current_post_id\t$post_title\t" .
 		implode( '|', array_values( $current_names ) ) . "\t" .
 		implode( '|', $new_names ) . "\t" .
 		implode( '|', $added_names ) . "\t" .
 		implode( '|', $removed_names ) . "\n"
 	);
 
-	if ( 'apply' === $mode ) {
-		wp_set_post_categories( $post_id, $new_ids );
+	if ( 'apply' === $apply_mode ) {
+		wp_set_post_categories( $current_post_id, $new_ids );
 	}
 
 	++$changes;
@@ -159,7 +162,8 @@ foreach ( $suggestions as $s ) {
 }
 
 fclose( $log );
+// phpcs:enable
 
-$verb = ( 'apply' === $mode ) ? 'Applied' : 'Would apply';
-WP_CLI::success( "$verb $changes changes. Skipped: $skipped. Errors: $errors." );
+$verb = ( 'apply' === $apply_mode ) ? 'Applied' : 'Would apply';
+WP_CLI::success( "$verb $changes changes. Skipped: $skipped. Errors: $error_count." );
 WP_CLI::log( 'Log: ' . $log_file );

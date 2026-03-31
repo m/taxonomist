@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<ruleset name="Taxonomist">
+	<description>WordPress Coding Standards for Taxonomist</description>
+
+	<rule ref="WordPress"/>
+
+	<file>./lib/</file>
+
+	<arg name="extensions" value="php"/>
+	<arg name="colors"/>
+	<arg value="sp"/>
+</ruleset>

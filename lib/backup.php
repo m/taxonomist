@@ -31,7 +31,7 @@ foreach ( $terms as $t ) {
 }
 
 // Export every post's category assignments.
-$posts = get_posts(
+$all_posts = get_posts(
 	array(
 		'numberposts' => -1,
 		'post_status' => 'publish',
@@ -40,7 +40,7 @@ $posts = get_posts(
 );
 
 $post_cats = array();
-foreach ( $posts as $p ) {
+foreach ( $all_posts as $p ) {
 	$cat_ids   = wp_get_post_categories( $p->ID );
 	$cat_slugs = wp_get_post_categories( $p->ID, array( 'fields' => 'slugs' ) );
 
@@ -53,12 +53,12 @@ foreach ( $posts as $p ) {
 }
 
 $backup = array(
-	'timestamp'       => gmdate( 'Y-m-d H:i:s' ),
-	'site_url'        => get_site_url(),
-	'total_posts'     => count( $post_cats ),
+	'timestamp'        => gmdate( 'Y-m-d H:i:s' ),
+	'site_url'         => get_site_url(),
+	'total_posts'      => count( $post_cats ),
 	'total_categories' => count( $term_data ),
-	'categories'      => $term_data,
-	'post_categories' => $post_cats,
+	'categories'       => $term_data,
+	'post_categories'  => $post_cats,
 );
 
 file_put_contents( $output_file, wp_json_encode( $backup, JSON_PRETTY_PRINT ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
