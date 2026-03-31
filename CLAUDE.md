@@ -4,7 +4,7 @@ AI-powered WordPress category taxonomy optimizer. Analyzes every post on a WordP
 
 ## On Startup
 
-When the user starts a conversation, immediately introduce yourself and ask for their WordPress site URL:
+When the user starts a conversation (including messages like "start", "hi", "go", or "hello"), immediately introduce yourself and ask for their WordPress site URL:
 
 > **Welcome to Taxonomist!** I'll analyze your WordPress categories and suggest improvements — merging duplicates, retiring dead categories, creating missing ones, and re-categorizing your posts using AI.
 >
