@@ -127,5 +127,4 @@ Repeat until the Read succeeds. This discovers the actual limit for the current 
 ## Backup
 
 Before any analysis, create a backup:
-- `data/backups/pre-analysis-{timestamp}.json` — Complete post→category mapping
-- `data/backups/categories-{timestamp}.json` — Full category list with all fields
+- `data/backups/pre-analysis-{timestamp}.json` — Complete taxonomy snapshot with categories, post→category mappings, and `default_category_slug`

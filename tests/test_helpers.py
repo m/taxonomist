@@ -77,6 +77,82 @@ class TestSplitIntoBatches(unittest.TestCase):
         self.assertEqual(total, 100)
 
 
+class TestCheckLargestBatch(unittest.TestCase):
+    """Tests for checking the largest batch file in a directory."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.test_dir)
+
+    def test_empty_dir(self):
+        from helpers import check_largest_batch
+        ok, largest, size = check_largest_batch(self.test_dir)
+        self.assertTrue(ok)
+        self.assertIsNone(largest)
+        self.assertEqual(size, 0)
+
+    def test_single_file(self):
+        from helpers import check_largest_batch
+        path = os.path.join(self.test_dir, 'batch-000.json')
+        with open(path, 'w') as f:
+            f.write('x' * 100)
+        
+        ok, largest, size = check_largest_batch(self.test_dir, max_chars=150)
+        self.assertTrue(ok)
+        self.assertEqual(largest, 'batch-000.json')
+        self.assertEqual(size, 100)
+
+    def test_multiple_files(self):
+        from helpers import check_largest_batch
+        for i, size in enumerate([50, 150, 100]):
+            path = os.path.join(self.test_dir, f'batch-{i:03d}.json')
+            with open(path, 'w') as f:
+                f.write('x' * size)
+        
+        ok, largest, size = check_largest_batch(self.test_dir, max_chars=200)
+        self.assertTrue(ok)
+        self.assertEqual(largest, 'batch-001.json')
+        self.assertEqual(size, 150)
+
+    def test_exceeds_limit(self):
+        from helpers import check_largest_batch
+        path = os.path.join(self.test_dir, 'batch-000.json')
+        with open(path, 'w') as f:
+            f.write('x' * 300)
+        
+        ok, largest, size = check_largest_batch(self.test_dir, max_chars=200)
+        self.assertFalse(ok)
+        self.assertEqual(largest, 'batch-000.json')
+        self.assertEqual(size, 300)
+
+
+class TestMaxBatchTokensEnv(unittest.TestCase):
+    """Tests for MAX_BATCH_TOKENS environment variable override."""
+
+    def test_env_override(self):
+        # We need to reload helpers to pick up the env var change
+        # since it's set at the module level.
+        import os
+        import importlib
+        import helpers
+        
+        original_val = os.environ.get('TAXONOMIST_MAX_BATCH_TOKENS')
+        try:
+            os.environ['TAXONOMIST_MAX_BATCH_TOKENS'] = '5000'
+            importlib.reload(helpers)
+            self.assertEqual(helpers.MAX_BATCH_TOKENS, 5000)
+            self.assertEqual(helpers.MAX_BATCH_CHARS, 5000 * 4)
+        finally:
+            if original_val is None:
+                del os.environ['TAXONOMIST_MAX_BATCH_TOKENS']
+            else:
+                os.environ['TAXONOMIST_MAX_BATCH_TOKENS'] = original_val
+            importlib.reload(helpers)
+
+
 class TestCalculateBatchSize(unittest.TestCase):
     """Tests for adaptive batch size calculation."""
 
@@ -144,6 +220,16 @@ class TestWriteBatches(unittest.TestCase):
             write_batches(posts, new_dir, batch_size=10)
             self.assertTrue(os.path.isdir(new_dir))
 
+    def test_removes_stale_batch_files(self):
+        posts = [{'id': 1}, {'id': 2}]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stale = os.path.join(tmpdir, 'batch-001.json')
+            with open(stale, 'w') as f:
+                f.write('stale')
+            paths, _ = write_batches(posts, tmpdir, batch_size=10)
+            self.assertEqual(len(paths), 1)
+            self.assertFalse(os.path.exists(stale))
+
 
 class TestAggregateResults(unittest.TestCase):
     """Tests for combining per-batch result files."""
@@ -185,6 +271,33 @@ class TestAggregateResults(unittest.TestCase):
             suggestions, _, _ = aggregate_results(tmpdir)
             self.assertEqual(len(suggestions), 1)
 
+    def test_ignores_non_result_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_result(tmpdir, 'result-000.json', [
+                {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
+            ])
+            self._write_result(tmpdir, 'categories.json', [
+                {'post_id': 99, 'cats': ['Noise'], 'new_cats': []},
+            ])
+            suggestions, _, _ = aggregate_results(tmpdir)
+            self.assertEqual(len(suggestions), 1)
+            self.assertEqual(suggestions[0]['post_id'], 1)
+
+    def test_dedupes_duplicate_post_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_result(tmpdir, 'result-000.json', [
+                {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
+            ])
+            self._write_result(tmpdir, 'result-001.json', [
+                {'post_id': 1, 'cats': ['AI'], 'new_cats': ['ML']},
+            ])
+            suggestions, cat_counts, new_counts = aggregate_results(tmpdir)
+            self.assertEqual(len(suggestions), 1)
+            self.assertEqual(suggestions[0]['cats'], ['AI'])
+            self.assertEqual(cat_counts['AI'], 1)
+            self.assertNotIn('Tech', cat_counts)
+            self.assertEqual(new_counts['ML'], 1)
+
     def test_sorted_file_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_result(tmpdir, 'result-001.json', [
@@ -210,6 +323,8 @@ class TestValidateExport(unittest.TestCase):
                 'date': '2024-01-01 00:00:00',
                 'content': 'Hello world',
                 'categories': ['Tech'],
+                'category_slugs': ['tech'],
+                'url': 'https://example.com/test',
             }
         ]
         self.assertEqual(validate_export(posts), [])
@@ -241,6 +356,21 @@ class TestValidateExport(unittest.TestCase):
     def test_empty_list_is_valid(self):
         self.assertEqual(validate_export([]), [])
 
+    def test_category_lists_must_contain_strings(self):
+        posts = [
+            {
+                'post_id': 1,
+                'title': 'Test',
+                'date': '2024-01-01 00:00:00',
+                'content': 'Hello',
+                'categories': ['Tech', 5],
+                'category_slugs': ['tech'],
+                'url': 'https://example.com/test',
+            }
+        ]
+        errors = validate_export(posts)
+        self.assertTrue(any('"categories" must contain only strings' in e for e in errors))
+
 
 class TestValidateSuggestions(unittest.TestCase):
     """Tests for suggestion JSON format validation."""
@@ -267,6 +397,16 @@ class TestValidateSuggestions(unittest.TestCase):
         errors = validate_suggestions(data)
         self.assertTrue(any('"cats" must be list' in e for e in errors))
 
+    def test_cats_entries_must_be_strings(self):
+        data = [{'post_id': 1, 'cats': ['Tech', 7]}]
+        errors = validate_suggestions(data)
+        self.assertTrue(any('"cats" must contain only strings' in e for e in errors))
+
+    def test_new_cats_entries_must_be_strings(self):
+        data = [{'post_id': 1, 'cats': ['tech'], 'new_cats': ['ml', 7]}]
+        errors = validate_suggestions(data)
+        self.assertTrue(any('"new_cats" must contain only strings' in e for e in errors))
+
 
 class TestValidateBackup(unittest.TestCase):
     """Tests for backup JSON format validation."""
@@ -277,6 +417,7 @@ class TestValidateBackup(unittest.TestCase):
             'site_url': 'https://example.com',
             'total_posts': 100,
             'total_categories': 10,
+            'default_category_slug': 'uncategorized',
             'categories': [
                 {'term_id': 1, 'name': 'Tech', 'slug': 'tech', 'description': '', 'count': 5, 'parent': 0}
             ],
@@ -294,6 +435,7 @@ class TestValidateBackup(unittest.TestCase):
         errors = validate_backup({})
         self.assertTrue(any('timestamp' in e for e in errors))
         self.assertTrue(any('categories' in e for e in errors))
+        self.assertTrue(any('default_category_slug' in e for e in errors))
 
     def test_missing_category_fields(self):
         backup = {
@@ -321,7 +463,7 @@ class TestParseChangeLog(unittest.TestCase):
     """Tests for parsing TSV change log files."""
 
     def test_parses_log(self):
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False, newline='') as f:
             f.write("timestamp\taction\tpost_id\tpost_title\told_categories\tnew_categories\tcats_added\tcats_removed\n")
             f.write("2024-01-01 00:00:00\tSET_CATS\t123\tTest Post\tAsides\tTech|AI\tTech|AI\tAsides\n")
             f.write("2024-01-01 00:00:01\tSET_CATS\t456\tOther Post\tAsides\tMusic\tMusic\tAsides\n")
@@ -334,6 +476,25 @@ class TestParseChangeLog(unittest.TestCase):
             self.assertEqual(changes[0]['action'], 'SET_CATS')
             self.assertEqual(changes[0]['cats_added'], 'Tech|AI')
             self.assertEqual(changes[1]['post_title'], 'Other Post')
+        finally:
+            os.unlink(path)
+
+    def test_parses_quoted_tabs_and_newlines(self):
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False, newline='') as f:
+            f.write("timestamp\taction\tpost_id\tpost_title\told_categories\tnew_categories\tcats_added\tcats_removed\n")
+            import csv
+            writer = csv.writer(f, delimiter='\t', quoting=csv.QUOTE_MINIMAL)
+            writer.writerow([
+                '2024-01-01 00:00:00', 'SET_CATS', '123', 'Title with\ttab',
+                'Old', 'New\nWrapped', 'Tech|AI', 'Asides'
+            ])
+            path = f.name
+
+        try:
+            changes = parse_change_log(path)
+            self.assertEqual(len(changes), 1)
+            self.assertEqual(changes[0]['post_title'], 'Title with\ttab')
+            self.assertEqual(changes[0]['new_categories'], 'New\nWrapped')
         finally:
             os.unlink(path)
 

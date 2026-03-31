@@ -39,7 +39,15 @@ $output_file = getenv( 'TAXONOMIST_OUTPUT' ) ? getenv( 'TAXONOMIST_OUTPUT' ) : '
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fwrite
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 $fp = fopen( $output_file, 'w' );
-fwrite( $fp, "[\n" );
+if ( false === $fp ) {
+	WP_CLI::error( 'Failed to open export file for writing: ' . $output_file );
+}
+$write_or_error = static function ( $file_pointer, $contents, $context ) {
+	if ( false === fwrite( $file_pointer, $contents ) ) {
+		WP_CLI::error( 'Failed to write ' . $context );
+	}
+};
+$write_or_error( $fp, "[\n", 'opening JSON array to ' . $output_file );
 
 // Fetch published posts in chunks using keyset pagination.
 // We track the last ID and query for ID > last_id instead of using
@@ -88,10 +96,9 @@ while ( true ) {
 	foreach ( $all_posts as $p ) {
 		// Comma-separate entries, but not before the first one.
 		if ( ! $first ) {
-			fwrite( $fp, ",\n" );
+			$write_or_error( $fp, ",\n", 'JSON separator to ' . $output_file );
 		}
 		$first = false;
-
 		// Get both category names (for AI analysis readability) and slugs
 		// (as stable identifiers that survive renames). The apply script
 		// resolves suggestions by slug, not name, to prevent drift.
@@ -116,7 +123,11 @@ while ( true ) {
 			)
 		);
 
-		fwrite( $fp, $row );
+		if ( false === $row ) {
+			fclose( $fp );
+			WP_CLI::error( 'Failed to JSON-encode post ID ' . $p->ID );
+		}
+		$write_or_error( $fp, $row, 'post row for post ID ' . $p->ID );
 		++$total_exported;
 
 		// Progress reporting every 500 posts.
@@ -132,8 +143,10 @@ while ( true ) {
 	wp_cache_flush();
 }
 
-fwrite( $fp, "\n]" );
-fclose( $fp );
+$write_or_error( $fp, "\n]", 'closing JSON array to ' . $output_file );
+if ( false === fclose( $fp ) ) {
+	WP_CLI::error( 'Failed to close export file: ' . $output_file );
+}
 // phpcs:enable
 
 WP_CLI::success( "Exported $total_exported posts to $output_file" );

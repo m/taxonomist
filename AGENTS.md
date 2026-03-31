@@ -138,7 +138,7 @@ taxonomist/
 Every operation that modifies the site is logged to `data/logs/`. Each log file is a TSV with columns:
 
 ```
-timestamp  action  post_id  post_title  old_categories  new_categories  category_added  category_removed  notes
+timestamp  action  post_id  post_title  old_categories  new_categories  cats_added  cats_removed
 ```
 
 Log files:
@@ -214,7 +214,7 @@ Or via REST API / WordPress.com API as appropriate for the connection method. Lo
 
 ## WordPress Access Adapters
 
-All WordPress operations go through an adapter layer (`lib/adapters/`) so the same logic works regardless of connection method.
+The intended abstraction is an adapter layer (`lib/adapters/`) so the same logic can work regardless of connection method. Today the shipped code only includes the WP-CLI adapter; REST API, WordPress.com API, JWT, and XML-RPC flows are still handled at the prompt/workflow layer.
 
 Required operations:
 - `list_categories()` — Get all categories with counts and descriptions

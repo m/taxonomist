@@ -196,10 +196,20 @@ foreach ( $backup['post_categories'] as $pc ) {
 		}
 	}
 
-	if ( ! empty( $target_ids ) ) {
-		wp_set_post_categories( $current_post_id, $target_ids );
-		++$restored;
+	$current_post = get_post( $current_post_id );
+	if ( ! $current_post ) {
+		WP_CLI::warning( 'Post ID ' . $current_post_id . ' no longer exists' );
+		++$error_count;
+		continue;
 	}
+
+	$set_result = wp_set_post_categories( $current_post_id, $target_ids );
+	if ( is_wp_error( $set_result ) || false === $set_result ) {
+		WP_CLI::warning( 'Failed to restore categories for post ID ' . $current_post_id );
+		++$error_count;
+		continue;
+	}
+	++$restored;
 
 	if ( 0 === $restored % 500 && $restored > 0 ) {
 		WP_CLI::log( "Restored $restored posts..." );

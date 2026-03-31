@@ -21,8 +21,8 @@ user to paste the code from their browser's URL bar.
 import http.server
 import json
 import os
+import secrets
 import sys
-import threading
 import time
 import urllib.parse
 import urllib.request
@@ -74,7 +74,9 @@ def exchange_code(code):
 
 def main():
     auth_code = None
+    auth_error = None
     server = None
+    oauth_state = secrets.token_urlsafe(32)
 
     # Build the authorization URL.
     # Note: do NOT include a "blog" parameter here — that triggers
@@ -86,6 +88,7 @@ def main():
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
         "scope": "global",
+        "state": oauth_state,
     }
 
     auth_url = (
@@ -98,11 +101,36 @@ def main():
     if port:
         class CallbackHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                nonlocal auth_code
+                nonlocal auth_code, auth_error
                 query = urllib.parse.parse_qs(
                     urllib.parse.urlparse(self.path).query
                 )
+                returned_state = query.get("state", [""])[0]
+                if returned_state != oauth_state:
+                    auth_error = "State mismatch in OAuth callback."
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(
+                        b"<html><body><h2>Authorization failed</h2>"
+                        b"<p>The OAuth state did not match. Return to the terminal and try again.</p>"
+                        b"</body></html>"
+                    )
+                    return
+
                 auth_code = query.get("code", [""])[0]
+                if not auth_code:
+                    auth_error = "No authorization code received in OAuth callback."
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(
+                        b"<html><body><h2>Authorization failed</h2>"
+                        b"<p>The callback did not include an authorization code.</p>"
+                        b"</body></html>"
+                    )
+                    return
+
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
@@ -131,8 +159,16 @@ def main():
 
         server.server_close()
 
+    # If the local server rejected the callback, stop before offering
+    # the manual fallback. A mismatched state means the flow is not safe to
+    # continue.
+    if auth_error:
+        print(auth_error, file=sys.stderr)
+        sys.exit(1)
+
     # If the local server didn't catch the redirect, ask the user to
-    # paste the code from their browser's URL bar.
+    # paste the full redirect URL from their browser's URL bar so we can
+    # validate the state before exchanging the code.
     if not auth_code:
         print(
             "\nThe redirect didn't reach the local server.",
@@ -143,11 +179,17 @@ def main():
             file=sys.stderr,
         )
         print(
-            f"  http://localhost:{LISTEN_PORT}/?code=XXXXXXXXXX",
+            f"  http://localhost:{LISTEN_PORT}/?code=XXXXXXXXXX&state=YYYYYYYYYY",
             file=sys.stderr,
         )
         print(file=sys.stderr)
-        auth_code = input("Paste the code value here: ").strip()
+        redirect_url = input("Paste the full redirect URL here: ").strip()
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(redirect_url).query)
+        auth_code = query.get("code", [""])[0]
+        returned_state = query.get("state", [""])[0]
+        if returned_state != oauth_state:
+            print("State mismatch in pasted redirect URL.", file=sys.stderr)
+            sys.exit(1)
 
     if not auth_code:
         print("No authorization code received.", file=sys.stderr)

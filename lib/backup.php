@@ -126,5 +126,12 @@ $backup = array(
 	'post_categories'       => $post_cats,
 );
 
-file_put_contents( $output_file, wp_json_encode( $backup, JSON_PRETTY_PRINT ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+$backup_json = wp_json_encode( $backup, JSON_PRETTY_PRINT );
+if ( false === $backup_json ) {
+	WP_CLI::error( 'Failed to JSON-encode backup payload' );
+}
+$bytes_written = file_put_contents( $output_file, $backup_json ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents
+if ( false === $bytes_written ) {
+	WP_CLI::error( 'Failed to write backup file: ' . $output_file );
+}
 WP_CLI::success( 'Backup saved to ' . $output_file . ' (' . count( $post_cats ) . ' posts, ' . count( $term_data ) . ' categories)' );

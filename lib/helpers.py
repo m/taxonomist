@@ -8,6 +8,7 @@ These run on the user's machine (not on WordPress) and handle:
 - Generating summary statistics from analysis results
 """
 
+import csv
 import json
 import os
 from collections import Counter
@@ -84,15 +85,22 @@ def write_batches(posts, batch_dir, batch_size=None):
     is not provided, it's calculated automatically to stay under the agent
     Read token limit (10K tokens).
 
+    Before writing, stale batch-NNN.json files are removed so reruns don't
+    leave behind extra batches from a previous export.
+
     Args:
         posts: List of post dicts from the export JSON.
         batch_dir: Directory to write batch files into. Created if missing.
         batch_size: Posts per batch. If None, calculated from content sizes.
 
     Returns:
-        List of file paths written.
+        Tuple of (paths_written, batch_size_used).
     """
     os.makedirs(batch_dir, exist_ok=True)
+    for filename in os.listdir(batch_dir):
+        if filename.startswith('batch-') and filename.endswith('.json'):
+            os.remove(os.path.join(batch_dir, filename))
+
     if batch_size is None:
         batch_size = calculate_batch_size(posts)
     batches = split_into_batches(posts, batch_size)
@@ -129,8 +137,10 @@ def aggregate_results(results_dir):
     """
     Combine per-batch result files into a single suggestions list.
 
-    Reads all result-NNN.json files from the directory, merges them,
-    and computes category frequency statistics.
+    Reads result-NNN.json files from the directory, de-duplicates by post_id,
+    and computes category frequency statistics from the final suggestion set.
+    If the same post_id appears multiple times, the last file in sorted order
+    wins so targeted reruns can replace stale earlier results.
 
     Args:
         results_dir: Directory containing result-NNN.json files.
@@ -139,21 +149,29 @@ def aggregate_results(results_dir):
         Tuple of (all_suggestions, category_counts, new_category_counts)
         where suggestions is a list of dicts, and counts are Counters.
     """
-    all_suggestions = []
-    cat_counts = Counter()
-    new_cat_counts = Counter()
+    suggestions_by_post_id = {}
+    unkeyed_suggestions = []
 
     for filename in sorted(os.listdir(results_dir)):
-        if not filename.endswith('.json'):
+        if not (filename.startswith('result-') and filename.endswith('.json')):
             continue
         with open(os.path.join(results_dir, filename)) as f:
             batch = json.load(f)
             for post in batch:
-                all_suggestions.append(post)
-                for cat in post.get('cats', []):
-                    cat_counts[cat] += 1
-                for cat in post.get('new_cats', []):
-                    new_cat_counts[cat] += 1
+                post_id = post.get('post_id')
+                if isinstance(post_id, int):
+                    suggestions_by_post_id[post_id] = post
+                else:
+                    unkeyed_suggestions.append(post)
+
+    all_suggestions = list(suggestions_by_post_id.values()) + unkeyed_suggestions
+    cat_counts = Counter()
+    new_cat_counts = Counter()
+    for post in all_suggestions:
+        for cat in post.get('cats', []):
+            cat_counts[cat] += 1
+        for cat in post.get('new_cats', []):
+            new_cat_counts[cat] += 1
 
     return all_suggestions, cat_counts, new_cat_counts
 
@@ -181,6 +199,8 @@ def validate_export(posts):
         'date': str,
         'content': str,
         'categories': list,
+        'category_slugs': list,
+        'url': str,
     }
 
     for i, post in enumerate(posts):
@@ -195,6 +215,13 @@ def validate_export(posts):
                     f'Post ID {post.get("post_id", f"index {i}")}: '
                     f'"{field}" should be {expected_type.__name__}, '
                     f'got {type(post[field]).__name__}'
+                )
+
+        for field in ('categories', 'category_slugs'):
+            if isinstance(post.get(field), list) and any(not isinstance(value, str) for value in post[field]):
+                errors.append(
+                    f'Post ID {post.get("post_id", f"index {i}")}: '
+                    f'"{field}" must contain only strings'
                 )
 
     return errors
@@ -229,6 +256,13 @@ def validate_suggestions(suggestions):
             errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: missing "cats"')
         elif not isinstance(entry['cats'], list):
             errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "cats" must be list')
+        elif any(not isinstance(cat, str) for cat in entry['cats']):
+            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "cats" must contain only strings')
+        if 'new_cats' in entry:
+            if not isinstance(entry['new_cats'], list):
+                errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "new_cats" must be list')
+            elif any(not isinstance(cat, str) for cat in entry['new_cats']):
+                errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "new_cats" must contain only strings')
 
     return errors
 
@@ -249,21 +283,32 @@ def validate_backup(backup):
     if not isinstance(backup, dict):
         return ['Backup must be a JSON object']
 
-    for key in ('timestamp', 'site_url', 'total_posts', 'total_categories', 'categories', 'post_categories'):
+    for key in ('timestamp', 'site_url', 'total_posts', 'total_categories', 'default_category_slug', 'categories', 'post_categories'):
         if key not in backup:
             errors.append(f'Missing required key: "{key}"')
 
+    if 'default_category_slug' in backup and not isinstance(backup['default_category_slug'], str):
+        errors.append('"default_category_slug" must be str')
+
     if 'categories' in backup:
-        for i, cat in enumerate(backup['categories']):
-            for field in ('term_id', 'name', 'slug'):
-                if field not in cat:
-                    errors.append(f'Category at index {i}: missing "{field}"')
+        if not isinstance(backup['categories'], list):
+            errors.append('"categories" must be a list')
+        else:
+            for i, cat in enumerate(backup['categories']):
+                for field in ('term_id', 'name', 'slug'):
+                    if field not in cat:
+                        errors.append(f'Category at index {i}: missing "{field}"')
 
     if 'post_categories' in backup:
-        for i, pc in enumerate(backup['post_categories']):
-            for field in ('post_id', 'category_slugs'):
-                if field not in pc:
-                    errors.append(f'Post mapping at index {i}: missing "{field}"')
+        if not isinstance(backup['post_categories'], list):
+            errors.append('"post_categories" must be a list')
+        else:
+            for i, pc in enumerate(backup['post_categories']):
+                for field in ('post_id', 'category_slugs'):
+                    if field not in pc:
+                        errors.append(f'Post mapping at index {i}: missing "{field}"')
+                if isinstance(pc.get('category_slugs'), list) and any(not isinstance(slug, str) for slug in pc['category_slugs']):
+                    errors.append(f'Post mapping at index {i}: "category_slugs" must contain only strings')
 
     return errors
 
@@ -272,7 +317,8 @@ def parse_change_log(log_path):
     """
     Parse a TSV change log file into a list of change dicts.
 
-    Skips the header row. Each dict contains the TSV column values.
+    Uses csv.DictReader so quoted tabs and embedded newlines are handled the
+    same way they were written by PHP's fputcsv().
 
     Args:
         log_path: Path to the TSV log file.
@@ -281,11 +327,5 @@ def parse_change_log(log_path):
         List of dicts with keys: timestamp, action, post_id, post_title,
         old_categories, new_categories, cats_added, cats_removed.
     """
-    changes = []
-    with open(log_path) as f:
-        header = f.readline().strip().split('\t')
-        for line in f:
-            values = line.strip().split('\t')
-            if len(values) >= len(header):
-                changes.append(dict(zip(header, values)))
-    return changes
+    with open(log_path, newline='') as f:
+        return list(csv.DictReader(f, delimiter='\t'))

@@ -45,9 +45,16 @@ if ( ! $suggestions_file || ! file_exists( $suggestions_file ) ) {
 	WP_CLI::error( 'Set TAXONOMIST_SUGGESTIONS to the suggestions JSON path' );
 }
 
-$suggestions = json_decode( file_get_contents( $suggestions_file ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file
-if ( ! $suggestions ) {
+$suggestions_json = file_get_contents( $suggestions_file ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- local file
+if ( false === $suggestions_json ) {
+	WP_CLI::error( 'Failed to read suggestions file' );
+}
+$suggestions = json_decode( $suggestions_json, true );
+if ( null === $suggestions && JSON_ERROR_NONE !== json_last_error() ) {
 	WP_CLI::error( 'Failed to parse suggestions file' );
+}
+if ( ! is_array( $suggestions ) ) {
+	WP_CLI::error( 'Suggestions file must decode to a JSON array' );
 }
 
 // Build a slug-to-term-ID lookup. Slugs are the stable identifier that
@@ -117,8 +124,15 @@ if ( ! empty( $unresolved ) ) {
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fopen
 // phpcs:disable WordPress.WP.AlternativeFunctions.file_system_operations_fclose
 $log = fopen( $log_file, 'w' );
+if ( false === $log ) {
+	WP_CLI::error( 'Failed to open log file for writing: ' . $log_file );
+}
 // Use fputcsv for secure TSV logging (handles internal tabs/newlines).
-fputcsv( $log, array( 'timestamp', 'action', 'post_id', 'post_title', 'old_categories', 'new_categories', 'cats_added', 'cats_removed' ), "\t" );
+$header_written = fputcsv( $log, array( 'timestamp', 'action', 'post_id', 'post_title', 'old_categories', 'new_categories', 'cats_added', 'cats_removed' ), "\t" );
+if ( false === $header_written ) {
+	fclose( $log ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+	WP_CLI::error( 'Failed to write log header to ' . $log_file );
+}
 
 $changes     = 0;
 $skipped     = 0;
@@ -205,31 +219,31 @@ foreach ( $suggestions as $suggestion ) {
 		}
 	}
 
-	// Write the change to the log BEFORE applying. If logging fails,
-	// abort immediately — applying changes without a log breaks the
-	// reversibility contract.
-	$ts         = gmdate( 'Y-m-d H:i:s' );
-	$log_result = fputcsv(
-		$log,
-		array(
-			$ts,
-			'SET_CATS',
-			$current_post_id,
-			$current_post->post_title,
-			implode( '|', array_values( $current_names ) ),
-			implode( '|', $new_names ),
-			implode( '|', $added_names ),
-			implode( '|', $removed_names ),
-		),
-		"\t"
+	$ts      = gmdate( 'Y-m-d H:i:s' );
+	$log_row = array(
+		$ts,
+		'SET_CATS',
+		$current_post_id,
+		$current_post->post_title,
+		implode( '|', array_values( $current_names ) ),
+		implode( '|', $new_names ),
+		implode( '|', $added_names ),
+		implode( '|', $removed_names ),
 	);
-	if ( false === $log_result ) {
-		fclose( $log ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-		WP_CLI::error( "Failed to write to log at post ID $current_post_id. Aborting to prevent un-logged changes." );
-	}
 
 	if ( 'apply' === $apply_mode ) {
-		wp_set_post_categories( $current_post_id, $new_ids );
+		$set_result = wp_set_post_categories( $current_post_id, $new_ids );
+		if ( is_wp_error( $set_result ) || false === $set_result ) {
+			++$error_count;
+			WP_CLI::warning( 'Failed to set categories for post ID ' . $current_post_id );
+			continue;
+		}
+	}
+
+	$log_result = fputcsv( $log, $log_row, "\t" );
+	if ( false === $log_result ) {
+		fclose( $log ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		WP_CLI::error( 'Failed to write change log row for post ID ' . $current_post_id );
 	}
 
 	++$changes;

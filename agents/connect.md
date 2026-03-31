@@ -168,7 +168,7 @@ python3 lib/wpcom-auth.py
 
 The script prints the token to stdout. Capture it and save to config.json. The user just clicks "Approve" in their browser — no manual copying needed.
 
-If the local server can't bind (port in use), the script falls back to asking the user to paste the code from their browser URL bar.
+If the local server can't bind (port in use), the script falls back to asking the user to paste the full redirect URL from their browser URL bar so the `state` value can be validated before exchanging the code.
 
 Save token to config.json (gitignored):
 ```json
