@@ -270,3 +270,13 @@ what should we do about this error [Image #2]
 ```
 
 ---
+## 2026-03-31 08:53:04
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+why did it work for us? should we check read limit before we set batch size?
+```
+
+---

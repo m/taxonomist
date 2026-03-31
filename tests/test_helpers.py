@@ -15,6 +15,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 from helpers import (
     aggregate_results,
+    calculate_batch_size,
     parse_change_log,
     split_into_batches,
     validate_backup,
@@ -63,6 +64,44 @@ class TestSplitIntoBatches(unittest.TestCase):
         batches = split_into_batches(posts, batch_size=1)
         self.assertEqual(len(batches), 3)
         self.assertEqual(len(batches[0]), 1)
+
+
+    def test_auto_batch_size(self):
+        """When batch_size is None, it's calculated from content."""
+        posts = [{'id': i, 'content': 'short'} for i in range(100)]
+        batches = split_into_batches(posts)
+        # Short posts should produce large batches.
+        self.assertTrue(len(batches[0]) > 10)
+        # All posts should be accounted for.
+        total = sum(len(b) for b in batches)
+        self.assertEqual(total, 100)
+
+
+class TestCalculateBatchSize(unittest.TestCase):
+    """Tests for adaptive batch size calculation."""
+
+    def test_empty_list(self):
+        self.assertEqual(calculate_batch_size([]), 50)
+
+    def test_short_posts_large_batches(self):
+        posts = [{'id': i, 'title': 'Hi'} for i in range(100)]
+        size = calculate_batch_size(posts)
+        self.assertGreaterEqual(size, 100)
+
+    def test_long_posts_small_batches(self):
+        posts = [{'id': i, 'content': 'x' * 10000} for i in range(10)]
+        size = calculate_batch_size(posts)
+        self.assertLessEqual(size, 10)
+
+    def test_minimum_batch_size(self):
+        posts = [{'id': i, 'content': 'x' * 100000} for i in range(5)]
+        size = calculate_batch_size(posts)
+        self.assertGreaterEqual(size, 5)
+
+    def test_maximum_batch_size(self):
+        posts = [{'id': i} for i in range(500)]
+        size = calculate_batch_size(posts)
+        self.assertLessEqual(size, 200)
 
 
 class TestWriteBatches(unittest.TestCase):

@@ -13,39 +13,82 @@ import os
 from collections import Counter
 
 
-def split_into_batches(posts, batch_size=50):
-    """
-    Split a list of posts into fixed-size batches for parallel analysis.
+MAX_BATCH_TOKENS = 8000  # Stay under the 10K Read tool limit with headroom.
+CHARS_PER_TOKEN = 4      # Conservative estimate for English text.
+MAX_BATCH_CHARS = MAX_BATCH_TOKENS * CHARS_PER_TOKEN
 
-    Each batch is small enough for a single AI agent to process in one
-    context window, but large enough to minimize overhead from many agents.
+
+def estimate_post_size(post):
+    """Estimate the JSON-serialized size of a post in characters."""
+    return len(json.dumps(post))
+
+
+def calculate_batch_size(posts, max_chars=MAX_BATCH_CHARS):
+    """
+    Calculate the optimal batch size based on actual post content sizes.
+
+    Samples the posts to estimate average size, then calculates how many
+    fit under the token limit. Returns at least 5 and at most 200.
 
     Args:
         posts: List of post dicts from the export JSON.
-        batch_size: Posts per batch. Default 200 balances agent context
-                    limits against parallelism overhead.
+        max_chars: Maximum total characters per batch file.
+
+    Returns:
+        Recommended batch size as an integer.
+    """
+    if not posts:
+        return 50
+
+    # Sample up to 20 posts to estimate average size.
+    sample = posts[:20] if len(posts) >= 20 else posts
+    avg_size = sum(estimate_post_size(p) for p in sample) / len(sample)
+
+    # Account for JSON array overhead (brackets, commas).
+    batch_size = int(max_chars / (avg_size + 2))
+
+    # Clamp between 5 and 200.
+    return max(5, min(200, batch_size))
+
+
+def split_into_batches(posts, batch_size=None):
+    """
+    Split a list of posts into batches for parallel analysis.
+
+    If batch_size is not provided, it's calculated automatically based
+    on the actual content sizes to stay under the agent Read token limit.
+
+    Args:
+        posts: List of post dicts from the export JSON.
+        batch_size: Posts per batch. If None, calculated automatically.
 
     Returns:
         List of lists, where each inner list has up to batch_size posts.
     """
+    if batch_size is None:
+        batch_size = calculate_batch_size(posts)
     return [posts[i:i + batch_size] for i in range(0, len(posts), batch_size)]
 
 
-def write_batches(posts, batch_dir, batch_size=50):
+def write_batches(posts, batch_dir, batch_size=None):
     """
     Split posts into batches and write each to a numbered JSON file.
 
-    Creates files like batch-000.json, batch-001.json, etc.
+    Creates files like batch-000.json, batch-001.json, etc. If batch_size
+    is not provided, it's calculated automatically to stay under the agent
+    Read token limit (10K tokens).
 
     Args:
         posts: List of post dicts from the export JSON.
         batch_dir: Directory to write batch files into. Created if missing.
-        batch_size: Posts per batch.
+        batch_size: Posts per batch. If None, calculated from content sizes.
 
     Returns:
         List of file paths written.
     """
     os.makedirs(batch_dir, exist_ok=True)
+    if batch_size is None:
+        batch_size = calculate_batch_size(posts)
     batches = split_into_batches(posts, batch_size)
     paths = []
     for i, batch in enumerate(batches):
