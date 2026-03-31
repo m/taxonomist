@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl *)",
+      "Bash(ssh *)",
+      "Bash(scp *)",
+      "Bash(wp *)",
+      "Bash(python3 *)",
+      "Bash(mkdir *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(wc *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(grep *)",
+      "Bash(open *)",
+      "Bash(cd *)",
+      "Read",
+      "Write(data/*)",
+      "Write(config.json)",
+      "Edit(data/*)",
+      "Edit(config.json)"
+    ]
+  }
+}

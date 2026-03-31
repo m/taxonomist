@@ -1,7 +1,7 @@
 .DS_Store
 __pycache__/
 *.pyc
-.claude/
+.claude/projects/
 data/
 config.json
 vendor/
