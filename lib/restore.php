@@ -2,8 +2,19 @@
 /**
  * Restore taxonomy state from a backup file.
  *
- * Run via: wp eval-file restore.php
- * Set TAXONOMIST_BACKUP env var to the backup file path.
+ * Reads a backup JSON created by backup.php and restores the exact
+ * category state: recreates any categories that were deleted, then
+ * sets every post's categories back to their original assignments.
+ *
+ * Uses category slugs (not IDs) for matching, since term IDs may change
+ * when categories are deleted and recreated.
+ *
+ * Usage:
+ *   TAXONOMIST_BACKUP=/path/to/backup.json wp eval-file restore.php
+ *
+ * Environment variables:
+ *   TAXONOMIST_BACKUP  Path to the backup JSON file created by backup.php.
+ *                      Required — the script will exit with an error if unset.
  *
  * @package Taxonomist
  */
@@ -21,7 +32,9 @@ if ( ! $backup ) {
 WP_CLI::log( 'Restoring from backup: ' . $backup['timestamp'] );
 WP_CLI::log( 'Posts: ' . $backup['total_posts'] . ', Categories: ' . $backup['total_categories'] );
 
-// Step 1: Recreate any missing categories.
+// Step 1: Recreate any categories that were deleted since the backup.
+// Build a slug-to-ID map of currently existing categories, then fill in
+// gaps from the backup data.
 $existing_slugs = array();
 $existing_terms = get_terms(
 	array(
@@ -54,7 +67,7 @@ foreach ( $backup['categories'] as $category ) {
 	}
 }
 
-// Step 2: Restore every post's categories.
+// Step 2: Restore every post's categories by resolving slugs to current IDs.
 $restored    = 0;
 $error_count = 0;
 foreach ( $backup['post_categories'] as $pc ) {
@@ -81,7 +94,7 @@ foreach ( $backup['post_categories'] as $pc ) {
 	}
 }
 
-// Step 3: Recount.
+// Step 3: Recount term usage to fix any stale counts.
 WP_CLI::runcommand( 'term recount category' );
 
 WP_CLI::success( "Restored $restored posts. Errors: $error_count" );

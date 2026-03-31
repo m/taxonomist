@@ -2,16 +2,43 @@
 /**
  * Create a complete backup of the current taxonomy state.
  *
- * Run via: wp eval-file backup.php
- * Set TAXONOMIST_OUTPUT env var to control output path.
- * Outputs a JSON file with every post's categories and all term data.
+ * Captures two things: (1) every category term with its metadata, and
+ * (2) the exact category assignments for every published post. Together
+ * these allow a full restore to the pre-change state, including recreating
+ * deleted categories and reassigning every post.
+ *
+ * Usage:
+ *   wp eval-file backup.php
+ *
+ * Environment variables:
+ *   TAXONOMIST_OUTPUT  Path for the backup JSON file.
+ *                      Default: /tmp/taxonomist-backup.json
+ *
+ * Output format:
+ *   {
+ *     "timestamp": "2024-01-15 10:30:00",
+ *     "site_url": "https://example.com",
+ *     "total_posts": 5672,
+ *     "total_categories": 64,
+ *     "categories": [
+ *       {"term_id": 1, "name": "...", "slug": "...", "description": "...", "count": 42, "parent": 0}
+ *     ],
+ *     "post_categories": [
+ *       {"post_id": 123, "post_title": "...", "category_ids": [1, 5], "category_slugs": ["tech", "ai"]}
+ *     ]
+ *   }
+ *
+ * The restore script (restore.php) reads this format to undo all changes.
+ * Category slugs are stored alongside IDs because term IDs may differ if
+ * categories are deleted and recreated.
  *
  * @package Taxonomist
  */
 
 $output_file = getenv( 'TAXONOMIST_OUTPUT' ) ? getenv( 'TAXONOMIST_OUTPUT' ) : '/tmp/taxonomist-backup.json';
 
-// Export all category terms.
+// Export all category terms, including empty ones that might be targets
+// for future assignment.
 $terms     = get_terms(
 	array(
 		'taxonomy'   => 'category',
@@ -30,7 +57,9 @@ foreach ( $terms as $t ) {
 	);
 }
 
-// Export every post's category assignments.
+// Export every published post's category assignments.
+// We store both IDs (for direct restore) and slugs (for cross-site portability
+// and resilience against term ID changes after deletion/recreation).
 $all_posts = get_posts(
 	array(
 		'numberposts' => -1,
