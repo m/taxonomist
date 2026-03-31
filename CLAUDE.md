@@ -26,10 +26,12 @@ This is a Claude Code tool. Users download this repo, open it with Claude Code, 
 2. **Export** — Download all posts (full content) and categories locally
 3. **Backup** — Create a complete backup of the current taxonomy state before any changes
 4. **Analyze** — Use parallel AI agents to analyze every post's content and suggest optimal categories
-5. **Plan** — Present findings: category usage stats, suggested merges/retirements/new categories, and improved descriptions
-6. **Review** — Iterate with the user until the plan is right
-7. **Apply** — Execute changes via WP-CLI or REST API, logging every single change
-8. **Verify** — Confirm the site still works and categories look correct
+5. **Plan** — Present findings: category usage stats, suggested merges/retirements/new categories
+6. **Descriptions** — Write or improve descriptions for every category (existing and new) based on what we learned analyzing posts. Present to user for review.
+7. **Review** — Iterate with the user until the full plan (categories + descriptions) is right
+8. **Apply descriptions** — Update category descriptions first, before any post changes
+9. **Apply categories** — Execute post category changes via WP-CLI or REST API, logging every single change
+10. **Verify** — Confirm the site still works and categories look correct
 
 ### Core Principles
 
@@ -162,8 +164,26 @@ Posts are split into batches of ~200 and analyzed by parallel AI agents. Each ag
 The analysis runs in phases:
 1. **Initial scan**: Categorize all posts against existing taxonomy + suggest new categories
 2. **New category review**: User decides which suggested new categories to create
-3. **Targeted scan**: Re-analyze for specific categories that need expansion (like the Audrey Capital example)
-4. **Description generation**: Generate/improve category descriptions based on actual post content
+3. **Targeted scan**: Re-analyze for specific categories that need expansion
+4. **Description generation**: Write or improve descriptions for every category (see below)
+
+## Category Descriptions
+
+BEFORE applying any post category changes, you MUST write or update descriptions for every category — both existing and newly proposed. This is a dedicated step — do not skip it.
+
+Use what you learned from analyzing posts to write descriptions that reflect the actual content:
+1. Review the posts assigned to (or suggested for) each category
+2. Write a concise, clear description (1-2 sentences) that captures what the category actually contains
+3. Improve existing descriptions that are empty, vague, or outdated
+4. The description should help readers understand what they'll find, not just restate the category name
+
+Present ALL descriptions (existing and new) to the user for review. Apply approved descriptions before making any post changes:
+
+```bash
+wp term update TERM_ID category --description="Description text here"
+```
+
+Or via REST API / WordPress.com API as appropriate for the connection method. Log every description change.
 
 ## WordPress Access Adapters
 
