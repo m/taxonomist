@@ -26,11 +26,14 @@ This is a Claude Code tool. Users download this repo, open it with Claude Code, 
 2. **Export** — Download all posts (full content) and categories locally
 3. **Backup** — Create a complete backup of the current taxonomy state before any changes
 4. **Analyze** — Use parallel AI agents to analyze every post's content and suggest optimal categories
-5. **Plan & Descriptions** — Present findings in a single table showing every category with current description and recommended description side by side (see format below). Include suggested merges, retirements, and new categories.
-6. **Review** — Iterate with the user until the full plan (categories + descriptions) is right
+5. **Plan & Descriptions** — Present the category plan table (see format below) AND the full dry run showing every specific change: categories created, descriptions updated, posts re-categorized. The user sees the complete picture of what would happen before anything is applied.
+6. **Review** — Iterate with the user until the plan is right
+7. **Authenticate** — Only after the user approves the dry run, ask for write credentials
 8. **Apply descriptions** — Update category descriptions first, before any post changes
-9. **Apply categories** — Execute post category changes via WP-CLI or REST API, logging every single change
+9. **Apply categories** — Execute post category changes, logging every single change
 10. **Verify** — Confirm the site still works and categories look correct
+
+**IMPORTANT:** Steps 1-6 require NO write access. The export and analysis use the public API or read-only access. Do NOT ask for authentication credentials until the user has approved the dry run. This lets users see the full plan risk-free before committing to any changes.
 
 ### Core Principles
 
