@@ -34,8 +34,11 @@ Taxonomist supports multiple ways to connect to your WordPress site:
 |---|---|---|
 | **WP-CLI over SSH** | Full-access servers | SSH + WP-CLI on server |
 | **WP-CLI local** | Local development | WP-CLI + local WordPress |
+| **WordPress.com API** | WordPress.com sites, Jetpack-connected sites | WordPress.com account or Jetpack |
 | **REST API** | Managed hosting | WordPress 5.6+, Application Password |
 | **XML-RPC** | Legacy setups | XML-RPC enabled |
+
+The WordPress.com API works for both WordPress.com-hosted sites and self-hosted WordPress sites connected via Jetpack — covering millions of sites.
 
 Don't know which to use? Just run the tool — it will probe your site and recommend the best method.
 

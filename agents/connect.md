@@ -94,9 +94,40 @@ Test: `curl -s -u {username}:{app_password} {url}/wp-json/wp/v2/categories?per_p
 ```
 Test: `curl -s -d '<?xml version="1.0"?><methodCall><methodName>wp.getCategories</methodName><params><param><value>1</value></param><param><value>{user}</value></param><param><value>{pass}</value></param></params></methodCall>' {url}/xmlrpc.php`
 
+### WordPress.com / Jetpack API
+```json
+{
+  "site_url": "https://example.wordpress.com",
+  "connection": {
+    "method": "wpcom-api",
+    "site_id": "82974409",
+    "access_token": "YOUR_OAUTH2_TOKEN"
+  }
+}
+```
+
+**Detection:** Check if the site is on WordPress.com (`*.wordpress.com`) or has Jetpack:
+- `curl -s {url}/wp-json/jetpack/v4/module` (Jetpack present)
+- `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` (returns site info if accessible)
+
+**Getting a token:**
+For WordPress.com users, the simplest path is to create an app at https://developer.wordpress.com/apps/ and use the OAuth2 flow:
+
+1. Direct user to: `https://public-api.wordpress.com/oauth2/authorize?client_id=CLIENT_ID&redirect_uri=REDIRECT&response_type=code`
+2. User authorizes, gets redirected with `?code=AUTH_CODE`
+3. Exchange code for token: `POST https://public-api.wordpress.com/oauth2/token` with `client_id`, `client_secret`, `grant_type=authorization_code`, `code`, `redirect_uri`
+
+For quick testing/personal use, users can generate a token at https://developer.wordpress.com/apps/ directly.
+
+**Site ID:** Can be the numeric ID or the domain name (e.g., `example.wordpress.com` or `82974409`).
+
+Test: `curl -s -H 'Authorization: Bearer TOKEN' 'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories?number=5'`
+
 ## Important
 
 - Never store passwords in plain text in config.json — use application passwords or tokens
 - Test the connection before writing config
 - Verify write access (not just read) by checking if the user has edit_posts capability
-- If WP-CLI is available, always prefer it — it's the most capable method
+- Connection method preference: WP-CLI SSH > WP-CLI local > WordPress.com API > REST API + App Password > REST API + JWT > XML-RPC
+- For WordPress.com hosted sites, the WordPress.com API is the natural choice
+- For self-hosted sites with Jetpack, offer the WordPress.com API as an option alongside direct REST API

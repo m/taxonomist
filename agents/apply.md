@@ -56,10 +56,37 @@ Log every post touched.
 wp eval 'wp_set_post_categories($post_id, $cat_ids);'
 # REST API
 curl -X POST -u user:pass {url}/wp-json/wp/v2/posts/{id} -d '{"categories":[1,2,3]}'
+# WordPress.com API (uses category names, not IDs)
+curl -X POST -H 'Authorization: Bearer TOKEN' \
+  --data-urlencode 'categories=Tech,WordPress' \
+  'https://public-api.wordpress.com/rest/v1.2/sites/SITE_ID/posts/POST_ID'
+```
+
+### Create Category
+```bash
+# WP-CLI
+wp term create category "Name" --slug=slug --description="..."
+# WordPress.com API
+curl -X POST -H 'Authorization: Bearer TOKEN' \
+  --data-urlencode 'name=Name' --data-urlencode 'description=...' \
+  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories/new'
+```
+
+### Update Category
+```bash
+# WordPress.com API
+curl -X POST -H 'Authorization: Bearer TOKEN' \
+  --data-urlencode 'description=New description' \
+  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories/slug:SLUG'
 ```
 
 ### Delete Category
 NEVER delete a category without first reassigning its posts. Log the deleted term's full data.
+```bash
+# WordPress.com API
+curl -X POST -H 'Authorization: Bearer TOKEN' \
+  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories/slug:SLUG/delete'
+```
 
 ## Execution Order
 

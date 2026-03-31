@@ -59,6 +59,29 @@ Paginate through posts: `GET /wp-json/wp/v2/posts?per_page=100&page=N&_fields=id
 Note: REST API returns rendered content — strip HTML after fetching.
 Category IDs need to be resolved to names via `GET /wp-json/wp/v2/categories?per_page=100`
 
+### WordPress.com / Jetpack API
+Base URL: `https://public-api.wordpress.com/rest/v1.1`
+Auth header: `Authorization: Bearer {token}`
+
+Categories (up to 1000 per page):
+```bash
+curl -H 'Authorization: Bearer TOKEN' \
+  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories?number=1000'
+```
+
+Posts (max 100 per page, use `page_handle` for efficient pagination):
+```bash
+# First page
+curl -H 'Authorization: Bearer TOKEN' \
+  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/posts?number=100&status=publish&fields=ID,title,content,date,categories'
+
+# Subsequent pages — use meta.next_page from previous response
+curl -H 'Authorization: Bearer TOKEN' \
+  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/posts?page_handle=HANDLE'
+```
+
+Note: Categories in post responses are a hash keyed by name (`{"Tech": {"ID": 123, ...}}`), not an array. Convert to a name list when saving.
+
 ### XML-RPC
 Use `wp.getPosts` with pagination. Limited to ~100 posts per call.
 

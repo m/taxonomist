@@ -50,9 +50,37 @@ The tool needs to connect to a WordPress site. Configuration is stored in `confi
 | WP-CLI local | `wp-cli-local` | WP-CLI installed locally, WordPress on same machine |
 | REST API + App Password | `rest-api` | WordPress 5.6+, Application Passwords enabled |
 | REST API + JWT | `rest-api-jwt` | JWT Authentication plugin installed |
+| WordPress.com API | `wpcom-api` | WordPress.com hosted site, or self-hosted with Jetpack connected |
 | XML-RPC | `xmlrpc` | XML-RPC enabled (legacy, not recommended) |
 
 If no config exists, the tool will interactively help the user set one up by probing the site.
+
+### WordPress.com / Jetpack API
+
+The WordPress.com REST API (`https://public-api.wordpress.com/rest/v1.1/`) works for both WordPress.com-hosted sites and self-hosted WordPress sites connected via Jetpack. This is often the easiest method for WordPress.com users since they already have an account.
+
+Authentication uses OAuth2 bearer tokens. The connect agent will walk users through getting a token.
+
+```json
+{
+  "site_url": "https://example.wordpress.com",
+  "connection": {
+    "method": "wpcom-api",
+    "site_id": "82974409",
+    "access_token": "YOUR_OAUTH2_TOKEN"
+  }
+}
+```
+
+Key endpoints:
+- `GET /sites/$site/categories` — list categories (max 1000 per page)
+- `GET /sites/$site/posts?number=100` — list posts (max 100 per page, use `page_handle` for pagination)
+- `POST /sites/$site/posts/$id` — update post categories (`categories` param: comma-separated names)
+- `POST /sites/$site/categories/new` — create category
+- `POST /sites/$site/categories/slug:$slug` — update category
+- `POST /sites/$site/categories/slug:$slug/delete` — delete category
+
+Note: categories in post responses are returned as a hash keyed by name, not an array of IDs.
 
 ## Directory Structure
 
