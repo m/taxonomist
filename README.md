@@ -6,21 +6,13 @@ Analyzes every post on your WordPress blog and suggests an improved category str
 
 ## Quick Start
 
-### 1. Install Claude Code (if you haven't already)
-
 ```bash
-npm install -g @anthropic-ai/claude-code
+curl -sL https://github.com/m/taxonomist/archive/main.tar.gz | tar xz
+cd taxonomist-main
+claude
 ```
 
-Or see [other install methods](https://docs.anthropic.com/en/docs/claude-code/overview).
-
-### 2. Run Taxonomist
-
-```bash
-npx degit m/taxonomist taxonomist && cd taxonomist && claude
-```
-
-Claude reads the instructions in this repo and walks you through everything — connecting to your site, analyzing posts, and applying changes with your approval at every step.
+That's it. [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) first if you haven't already, then tell Claude which site to optimize.
 
 ## What It Does
 
