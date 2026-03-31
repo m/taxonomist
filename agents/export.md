@@ -27,6 +27,10 @@ Export to `data/export/categories.json`:
 }]
 ```
 
+These exported `term_id` and `slug` values are authoritative for later
+category updates/deletes. Keep them intact and resolve against this file
+during apply; never invent a slug by normalizing the display name.
+
 ### Posts
 Export to `data/export/posts.json`:
 ```json
@@ -36,6 +40,8 @@ Export to `data/export/posts.json`:
   "date": "2024-01-15 10:30:00",
   "content": "Full post content with HTML stripped...",
   "categories": ["Category1", "Category2"],
+  "category_ids": [1, 2],
+  "category_slugs": ["category1", "category2"],
   "url": "https://example.com/2024/01/post-slug/"
 }]
 ```
@@ -49,7 +55,7 @@ Export to `data/export/posts.json`:
 **You MUST use the provided scripts. Do not write inline PHP loops.**
 
 ```bash
-# Export posts — paginated, memory-safe, includes category slugs
+# Export posts — paginated, memory-safe, includes category IDs and slugs
 TAXONOMIST_OUTPUT=/path/to/posts.json wp eval-file lib/export-posts.php
 
 # Backup taxonomy state — paginated, includes default_category
@@ -59,7 +65,7 @@ TAXONOMIST_OUTPUT=/path/to/backup.json wp eval-file lib/backup.php
 ### REST API
 Paginate through posts: `GET /wp-json/wp/v2/posts?per_page=100&page=N&_fields=id,title,content,date,categories`
 Note: REST API returns rendered content — strip HTML after fetching.
-Category IDs need to be resolved to names via `GET /wp-json/wp/v2/categories?per_page=100`
+Resolve category IDs/slugs/names via `GET /wp-json/wp/v2/categories?per_page=100`
 
 ### WordPress.com / Jetpack API
 Base URL: `https://public-api.wordpress.com/rest/v1.1`
@@ -82,7 +88,7 @@ curl -H 'Authorization: Bearer TOKEN' \
   'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/posts?page_handle=HANDLE'
 ```
 
-Note: Categories in post responses are a hash keyed by name (`{"Tech": {"ID": 123, ...}}`), not an array. Convert to a name list when saving.
+Note: Categories in post responses are a hash keyed by name (`{"Tech": {"ID": 123, ...}}`), not an array. Convert them to saved `categories`, `category_ids`, and `category_slugs` fields when exporting.
 
 ### XML-RPC
 Use `wp.getPosts` with pagination. Limited to ~100 posts per call.

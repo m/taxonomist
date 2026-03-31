@@ -3,8 +3,8 @@
  * Apply category changes from an AI-generated suggestions file.
  *
  * Reads a JSON file of per-post category suggestions and applies them.
- * Categories are resolved by **slug** (not display name) to prevent
- * drift between the export/analysis and apply phases.
+ * Categories are resolved by **term ID** to prevent drift between the
+ * export/analysis and apply phases.
  *
  * The merge strategy is additive: suggested categories are added to
  * existing ones, and only categories listed in TAXONOMIST_REMOVE_CATS
@@ -19,16 +19,16 @@
  *
  * Environment variables:
  *   TAXONOMIST_SUGGESTIONS  Path to the suggestions JSON file. Required.
- *                           Format: [{"post_id": 123, "cats": ["WordPress", "ai"]}, ...]
- *                           Values in "cats" are category slugs.
+ *                           Format: [{"post_id": 123, "cats": [4, 9]}, ...]
+ *                           Values in "cats" are category term IDs.
  *   TAXONOMIST_LOG          Path for the change log TSV.
  *                           Default: /tmp/taxonomist-changes.tsv
  *   TAXONOMIST_MODE         "preview" (default) shows what would change.
  *                           "apply" executes the changes.
- *   TAXONOMIST_REMOVE_CATS  Comma-separated category slugs to strip from
+ *   TAXONOMIST_REMOVE_CATS  Comma-separated category term IDs to strip from
  *                           posts that receive new suggestions. Example:
- *                           "asides,uncategorized" removes the catch-all
- *                           categories when a real category is assigned.
+ *                           "17,23" removes catch-all categories when a
+ *                           real category is assigned.
  *
  * Log format (TSV):
  *   timestamp  action  post_id  post_title  old_categories  new_categories  cats_added  cats_removed
@@ -57,35 +57,49 @@ if ( ! is_array( $suggestions ) ) {
 	WP_CLI::error( 'Suggestions file must decode to a JSON array' );
 }
 
-// Build a slug-to-term-ID lookup. Slugs are the stable identifier that
-// survives renames and is consistent across export, analysis, and apply.
-$all_cats     = get_terms(
+// Build live category lookups. Term IDs are the canonical identifier for
+// analysis/apply, while names are used only for logs.
+$all_cats   = get_terms(
 	array(
 		'taxonomy'   => 'category',
 		'hide_empty' => false,
 	)
 );
-$slug_to_id   = array();
-$slug_to_name = array();
+$id_to_name = array();
 foreach ( $all_cats as $t ) {
-	$slug_to_id[ $t->slug ]   = $t->term_id;
-	$slug_to_name[ $t->slug ] = $t->name;
+	$id_to_name[ $t->term_id ] = $t->name;
 }
 
-// Also build a case-insensitive name-to-slug fallback for suggestions
-// that were generated with names instead of slugs (legacy compatibility).
-$name_to_slug = array();
-foreach ( $all_cats as $t ) {
-	$name_to_slug[ strtolower( $t->name ) ] = $t->slug;
-}
-
-// Parse the list of category slugs to strip from posts.
-$remove_slugs = array_filter( array_map( 'trim', explode( ',', $remove_cats_str ) ) );
-$remove_ids   = array();
-foreach ( $remove_slugs as $slug ) {
-	if ( isset( $slug_to_id[ $slug ] ) ) {
-		$remove_ids[] = $slug_to_id[ $slug ];
+// Parse the list of category IDs to strip from posts.
+$remove_refs        = array_filter( array_map( 'trim', explode( ',', $remove_cats_str ) ), 'strlen' );
+$remove_ids         = array();
+$invalid_remove_ids = array();
+foreach ( $remove_refs as $ref ) {
+	if ( ctype_digit( $ref ) ) {
+		$remove_ids[] = (int) $ref;
+	} else {
+		$invalid_remove_ids[] = $ref;
 	}
+}
+
+if ( ! empty( $invalid_remove_ids ) ) {
+	WP_CLI::error(
+		'TAXONOMIST_REMOVE_CATS must contain category term IDs, got: ' .
+		implode( ', ', $invalid_remove_ids )
+	);
+}
+
+$unknown_remove_ids = array();
+foreach ( $remove_ids as $remove_id ) {
+	if ( ! isset( $id_to_name[ $remove_id ] ) ) {
+		$unknown_remove_ids[] = $remove_id;
+	}
+}
+if ( ! empty( $unknown_remove_ids ) ) {
+	WP_CLI::error(
+		'TAXONOMIST_REMOVE_CATS includes IDs that do not exist in the live taxonomy: ' .
+		implode( ', ', $unknown_remove_ids )
+	);
 }
 
 // Safety check: refuse to strip the default category. If the user wants to
@@ -100,22 +114,39 @@ if ( in_array( $default_cat_id, $remove_ids, true ) ) {
 	);
 }
 
-// Pre-flight check: verify all suggested slugs exist in the live taxonomy.
+// Pre-flight check: verify all suggested category IDs exist in the live
+// taxonomy and reject non-ID references.
 // Abort early if there are unresolved references — this prevents silent
 // data loss from taxonomy drift between export and apply.
-$unresolved = array();
+$unresolved   = array();
+$invalid_refs = array();
 foreach ( $suggestions as $suggestion ) {
 	$suggested_refs = isset( $suggestion['cats'] ) ? $suggestion['cats'] : array();
 	foreach ( $suggested_refs as $ref ) {
-		if ( ! isset( $slug_to_id[ $ref ] ) ) {
-			$unresolved[ $ref ] = true;
+		if ( is_int( $ref ) ) {
+			if ( ! isset( $id_to_name[ $ref ] ) ) {
+				$unresolved[ $ref ] = true;
+			}
+		} elseif ( is_string( $ref ) && ctype_digit( $ref ) ) {
+			$ref = (int) $ref;
+			if ( ! isset( $id_to_name[ $ref ] ) ) {
+				$unresolved[ $ref ] = true;
+			}
+		} else {
+			$invalid_refs[] = wp_json_encode( $ref );
 		}
 	}
+}
+if ( ! empty( $invalid_refs ) ) {
+	WP_CLI::error(
+		'Suggestions must use category term IDs in "cats". Invalid values: ' .
+		implode( ', ', array_unique( $invalid_refs ) )
+	);
 }
 if ( ! empty( $unresolved ) ) {
 	$list = implode( ', ', array_keys( $unresolved ) );
 	WP_CLI::error(
-		"Taxonomy drift detected: these categories from the suggestions do not exist in the live site: $list. " .
+		"Taxonomy drift detected: these category IDs from the suggestions do not exist in the live site: $list. " .
 		'Re-export and re-analyze, or create the missing categories first.'
 	);
 }
@@ -171,12 +202,10 @@ foreach ( $suggestions as $suggestion ) {
 		}
 	}
 
-	// Resolve suggestions to term IDs via slug.
+	// Resolve suggestions to term IDs.
 	$suggested_ids = array();
 	foreach ( $suggested_refs as $ref ) {
-		if ( isset( $slug_to_id[ $ref ] ) ) {
-			$suggested_ids[] = $slug_to_id[ $ref ];
-		}
+		$suggested_ids[] = (int) $ref;
 	}
 
 	// Merge: union of kept existing + new suggestions.

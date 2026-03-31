@@ -25,6 +25,39 @@ MAX_BATCH_CHARS = MAX_BATCH_TOKENS * CHARS_PER_TOKEN
 
 
 
+def wp_urlencode(params):
+    """
+    Encode parameters for the WordPress API (form-encoded).
+
+    Handles nested dictionaries and lists by flattening them into the
+    'key[subkey][]' format expected by PHP/WordPress. Use this to avoid the
+    'stringified list' bug when sending arrays via urllib.parse.urlencode.
+
+    Args:
+        params: Dictionary of parameters (can be nested).
+
+    Returns:
+        URL-encoded string.
+    """
+    import urllib.parse
+    flattened = []
+
+    def flatten(obj, prefix=''):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                new_prefix = f'{prefix}[{k}]' if prefix else k
+                flatten(v, new_prefix)
+        elif isinstance(obj, list):
+            for v in obj:
+                # Add [] to the key for list items.
+                flattened.append((f'{prefix}[]', v))
+        else:
+            flattened.append((prefix, str(obj)))
+
+    flatten(params)
+    return urllib.parse.urlencode(flattened)
+
+
 def estimate_post_size(post):
     """Estimate the JSON-serialized size of a post in characters."""
     return len(json.dumps(post))
@@ -199,6 +232,7 @@ def validate_export(posts):
         'date': str,
         'content': str,
         'categories': list,
+        'category_ids': list,
         'category_slugs': list,
         'url': str,
     }
@@ -217,6 +251,12 @@ def validate_export(posts):
                     f'got {type(post[field]).__name__}'
                 )
 
+        if isinstance(post.get('category_ids'), list) and any(type(value) is not int for value in post['category_ids']):
+            errors.append(
+                f'Post ID {post.get("post_id", f"index {i}")}: '
+                '"category_ids" must contain only ints'
+            )
+
         for field in ('categories', 'category_slugs'):
             if isinstance(post.get(field), list) and any(not isinstance(value, str) for value in post[field]):
                 errors.append(
@@ -232,6 +272,7 @@ def validate_suggestions(suggestions):
     Validate that a suggestions JSON has the expected structure.
 
     Each entry must have an integer "post_id" and a list "cats".
+    Values in "cats" must be category term IDs.
     "new_cats" is optional.
 
     Args:
@@ -256,8 +297,8 @@ def validate_suggestions(suggestions):
             errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: missing "cats"')
         elif not isinstance(entry['cats'], list):
             errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "cats" must be list')
-        elif any(not isinstance(cat, str) for cat in entry['cats']):
-            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "cats" must contain only strings')
+        elif any(type(cat) is not int for cat in entry['cats']):
+            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "cats" must contain only ints')
         if 'new_cats' in entry:
             if not isinstance(entry['new_cats'], list):
                 errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "new_cats" must be list')
@@ -311,6 +352,73 @@ def validate_backup(backup):
                     errors.append(f'Post mapping at index {i}: "category_slugs" must contain only strings')
 
     return errors
+
+
+def resolve_category_export_row(categories, *, term_id=None, slug=None, name=None):
+    """
+    Resolve a category from exported metadata without guessing.
+
+    Delete/update operations must use the exact term_id or slug captured
+    during export. Name-only lookups are rejected because duplicate names
+    under different parents can map to different slugs.
+
+    Args:
+        categories: Parsed JSON list from data/export/categories.json or
+            backup["categories"].
+        term_id: Exact exported term ID to match.
+        slug: Exact exported slug to match.
+        name: Optional display name, used only to produce a clearer error
+            when a caller tries to resolve by name alone.
+
+    Returns:
+        Matching category dict from the export.
+
+    Raises:
+        ValueError: If no stable identifier was provided, if duplicates are
+            present in the export, or if provided identifiers disagree.
+        KeyError: If the requested term_id/slug does not exist in the export.
+    """
+    if not isinstance(categories, list):
+        raise ValueError('categories must be a list of exported category objects')
+
+    if term_id is None and slug is None:
+        if name:
+            raise ValueError(
+                f'Cannot resolve category "{name}" from name alone; '
+                'use the exported term_id or exact slug instead.'
+            )
+        raise ValueError('Provide term_id or slug from the category export')
+
+    match = None
+
+    if term_id is not None:
+        id_matches = [
+            category for category in categories
+            if isinstance(category, dict) and category.get('term_id') == term_id
+        ]
+        if not id_matches:
+            raise KeyError(f'No category found with term_id {term_id}')
+        if len(id_matches) > 1:
+            raise ValueError(f'Duplicate term_id {term_id} found in category export')
+        match = id_matches[0]
+
+    if slug is not None:
+        slug_matches = [
+            category for category in categories
+            if isinstance(category, dict) and category.get('slug') == slug
+        ]
+        if not slug_matches:
+            raise KeyError(f'No category found with slug "{slug}"')
+        if len(slug_matches) > 1:
+            raise ValueError(f'Duplicate slug "{slug}" found in category export')
+        slug_match = slug_matches[0]
+        if match is not None and match is not slug_match:
+            raise ValueError(
+                f'term_id {term_id} and slug "{slug}" resolve to different categories'
+            )
+        match = slug_match
+
+    return match
 
 
 def parse_change_log(log_path):

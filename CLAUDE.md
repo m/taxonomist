@@ -106,6 +106,11 @@ Key endpoints:
 - `POST /sites/$site/categories/slug:$slug/delete` — delete category
 
 Note: categories in post responses are returned as a hash keyed by name, not an array of IDs.
+Use exported `term_id` values as the canonical category identifier throughout
+analysis and apply. For category updates or deletes, resolve the exact
+`term_id` / `slug` from `data/export/categories.json` (or the backup
+`categories` array) first, and only translate to slug/name at the API
+boundary when required. Never construct a slug from the display name.
 
 ## Directory Structure
 
@@ -163,7 +168,7 @@ Claude will read the log and backup files and restore the exact previous state.
 
 ## Analysis Approach
 
-Use `lib/helpers.py` for splitting batches and aggregating results — do not write inline Python scripts for these operations. Use `lib/helpers.aggregate_results()` to combine per-batch results.
+Use `lib/helpers.py` for splitting batches, aggregating results, and encoding WordPress API parameters (to avoid the array stringification bug) — do not write inline Python scripts for these operations. Use `lib.helpers.wp_urlencode()` for safe parameter encoding.
 
 Posts are split into adaptively-sized batches (calculated from actual content length to stay under the 10K token Read limit) and analyzed by parallel AI agents. Each agent receives:
 - The full post content (not truncated)

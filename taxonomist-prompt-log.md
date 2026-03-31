@@ -320,3 +320,98 @@ no don't redo getting it, let's just save it somewhere better
 ```
 
 ---
+## 2026-03-31 09:23:46
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+what could it look like if the quick start script gave the user an option to run claude with --dangerously-skip-permissions or not
+```
+
+---
+## 2026-03-31 09:24:37
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+let me test this in a terminal
+```
+
+---
+## 2026-03-31 09:25:56
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+it said ❯ start
+
+⏺ What would you like to work on?
+```
+
+---
+## 2026-03-31 09:27:00
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+this is current quick start: curl -sL https://github.com/m/taxonomist/archive/main.tar.gz | tar xz && cd taxonomist-main && claude "Welcome to Taxonomist! Introduce yourself and ask for my WordPress site URL."
+
+give me a version of that that runs the test script to test with
+```
+
+---
+## 2026-03-31 09:41:40
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+latest version is suggestion ma.tt every time, it should just ask for a URL free form
+
+ ☐ Site URL
+
+What's your WordPress site URL?
+
+❯ 1. ma.tt
+     Matt Mullenweg's personal blog
+  2. wordpress.com site
+     A WordPress.com hosted site
+  3. Self-hosted WordPress
+     A self-hosted WordPress installation
+```
+
+---
+## 2026-03-31 09:50:46
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+let's update readme testing thank yous to include Hannah Swain Løvik, Joash Rajin, and Rich Tabor
+```
+
+---
+## 2026-03-31 09:53:26
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+I'm getting lots of errors like this on latest:  Command contains quote characters inside a # comment which can desync quote tracking
+```
+
+---
+## 2026-03-31 09:56:52
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+let's add https://x.com/photomatt to the follow suggestion in intro
+```
+
+---
