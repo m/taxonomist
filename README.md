@@ -48,7 +48,7 @@ Posts are exported locally and split into batches. Parallel AI agents analyze th
 
 ## Thanks
 
-Thanks to Automattician [Arun Sathiya](https://github.com/arunsathiya) for help testing.
+Thanks to Automattician [Arun Sathiya](https://www.arun.blog/) for help testing.
 
 ## License
 
