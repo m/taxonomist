@@ -15,19 +15,21 @@ All configuration should happen through the conversation. Ask for credentials in
 ## Steps
 
 1. Ask for the site URL if not provided
-2. Probe the site to detect available connection methods:
-   - Check if REST API is accessible: `curl -s {url}/wp-json/wp/v2/categories | head -c 200`
-   - Check if XML-RPC is enabled: `curl -s {url}/xmlrpc.php`
-   - Check REST API authentication requirement: `curl -s {url}/wp-json/wp/v2/posts?per_page=1`
-   - If user mentions SSH access, test: `ssh {user}@{host} "which wp"`
+2. Probe the site — check WordPress.com first:
+   - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` — if this returns site info, it's a WordPress.com site (hosted or Jetpack-connected). **Go straight to the WordPress.com OAuth flow.** Do NOT try password grant, Basic auth, or Application Passwords — they don't work for WordPress.com hosted sites.
+   - If not WordPress.com, check self-hosted methods:
+     - REST API: `curl -s {url}/wp-json/wp/v2/categories | head -c 200`
+     - If user mentions SSH: `ssh {user}@{host} "which wp"`
+     - XML-RPC (last resort): `curl -s {url}/xmlrpc.php`
 3. Based on what's available, recommend the best method:
-   - Prefer WP-CLI over SSH (most capable, can do bulk operations)
-   - REST API + Application Passwords is the easiest remote method
+   - WordPress.com sites → WordPress.com OAuth (always)
+   - Self-hosted with SSH → WP-CLI over SSH
+   - Self-hosted without SSH → REST API + Application Passwords
    - XML-RPC is last resort (limited, being deprecated)
-4. Walk the user through authentication setup for the chosen method:
-   - Ask for credentials directly in the conversation (username, password, SSH host, etc.)
-   - Guide them to create Application Passwords if needed, but collect the result via chat
+4. Walk the user through authentication:
+   - Ask for credentials directly in the conversation
    - Never tell the user to edit config.json themselves
+   - Never show credentials in curl commands — write them to config.json and read from there
 5. Test the connection by listing categories
 6. Write config.json automatically with the working credentials
 
