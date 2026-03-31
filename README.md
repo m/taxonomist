@@ -65,4 +65,4 @@ Posts are exported locally and split into batches of ~200. Parallel AI agents an
 
 ## License
 
-MIT
+[GPLv2 or later](LICENSE), same as WordPress.
