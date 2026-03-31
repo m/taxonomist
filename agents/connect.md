@@ -184,7 +184,7 @@ Save config (no secrets on disk):
   "site_url": "https://example.wordpress.com",
   "connection": {
     "method": "wpcom-api",
-    "site_id": "82974409"
+    "site_id": "YOUR_SITE_ID"
   }
 }
 ```

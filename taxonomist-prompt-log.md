@@ -210,3 +210,13 @@ instead of writing credentials in plain text can we just keep them in memory dur
 ```
 
 ---
+## 2026-03-31 08:42:15
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+don't hardcode site_id
+```
+
+---

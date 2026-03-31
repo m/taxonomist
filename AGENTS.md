@@ -85,7 +85,7 @@ Taxonomist is registered as a WordPress.com OAuth2 app (Client ID: `136301`). Us
   "site_url": "https://example.wordpress.com",
   "connection": {
     "method": "wpcom-api",
-    "site_id": "82974409",
+    "site_id": "YOUR_SITE_ID",
     "access_token": "YOUR_OAUTH2_TOKEN"
   }
 }
