@@ -111,11 +111,11 @@ class TestAggregateResults(unittest.TestCase):
     def test_combines_batches(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_result(tmpdir, 'result-000.json', [
-                {'id': 1, 'cats': ['Tech'], 'new_cats': []},
-                {'id': 2, 'cats': ['Music'], 'new_cats': ['Jazz']},
+                {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
+                {'post_id': 2, 'cats': ['Music'], 'new_cats': ['Jazz']},
             ])
             self._write_result(tmpdir, 'result-001.json', [
-                {'id': 3, 'cats': ['Tech', 'AI'], 'new_cats': []},
+                {'post_id': 3, 'cats': ['Tech', 'AI'], 'new_cats': []},
             ])
             suggestions, cat_counts, new_counts = aggregate_results(tmpdir)
             self.assertEqual(len(suggestions), 3)
@@ -133,7 +133,7 @@ class TestAggregateResults(unittest.TestCase):
     def test_ignores_non_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_result(tmpdir, 'result-000.json', [
-                {'id': 1, 'cats': ['Tech'], 'new_cats': []},
+                {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
             ])
             with open(os.path.join(tmpdir, 'notes.txt'), 'w') as f:
                 f.write('ignore me')
@@ -143,15 +143,15 @@ class TestAggregateResults(unittest.TestCase):
     def test_sorted_file_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_result(tmpdir, 'result-001.json', [
-                {'id': 99, 'cats': ['B'], 'new_cats': []},
+                {'post_id': 99, 'cats': ['B'], 'new_cats': []},
             ])
             self._write_result(tmpdir, 'result-000.json', [
-                {'id': 1, 'cats': ['A'], 'new_cats': []},
+                {'post_id': 1, 'cats': ['A'], 'new_cats': []},
             ])
             suggestions, _, _ = aggregate_results(tmpdir)
             # result-000 should come first due to sorted() filename order.
-            self.assertEqual(suggestions[0]['id'], 1)
-            self.assertEqual(suggestions[1]['id'], 99)
+            self.assertEqual(suggestions[0]['post_id'], 1)
+            self.assertEqual(suggestions[1]['post_id'], 99)
 
 
 class TestValidateExport(unittest.TestCase):
@@ -160,7 +160,7 @@ class TestValidateExport(unittest.TestCase):
     def test_valid_export(self):
         posts = [
             {
-                'id': 1,
+                'post_id': 1,
                 'title': 'Test',
                 'date': '2024-01-01 00:00:00',
                 'content': 'Hello world',
@@ -170,12 +170,12 @@ class TestValidateExport(unittest.TestCase):
         self.assertEqual(validate_export(posts), [])
 
     def test_not_a_list(self):
-        errors = validate_export({'id': 1})
+        errors = validate_export({'post_id': 1})
         self.assertEqual(len(errors), 1)
         self.assertIn('JSON array', errors[0])
 
     def test_missing_field(self):
-        posts = [{'id': 1, 'title': 'Test'}]
+        posts = [{'post_id': 1, 'title': 'Test'}]
         errors = validate_export(posts)
         self.assertTrue(any('missing "date"' in e for e in errors))
         self.assertTrue(any('missing "content"' in e for e in errors))
@@ -183,7 +183,7 @@ class TestValidateExport(unittest.TestCase):
     def test_wrong_type(self):
         posts = [
             {
-                'id': 'not-an-int',
+                'post_id': 'not-an-int',
                 'title': 'Test',
                 'date': '2024-01-01',
                 'content': 'Hello',
@@ -191,7 +191,7 @@ class TestValidateExport(unittest.TestCase):
             }
         ]
         errors = validate_export(posts)
-        self.assertTrue(any('"id" should be int' in e for e in errors))
+        self.assertTrue(any('"post_id" should be int' in e for e in errors))
 
     def test_empty_list_is_valid(self):
         self.assertEqual(validate_export([]), [])
@@ -202,23 +202,23 @@ class TestValidateSuggestions(unittest.TestCase):
 
     def test_valid_suggestions(self):
         data = [
-            {'id': 1, 'cats': ['Tech'], 'new_cats': []},
-            {'id': 2, 'cats': ['Music', 'Jazz']},
+            {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
+            {'post_id': 2, 'cats': ['Music', 'Jazz']},
         ]
         self.assertEqual(validate_suggestions(data), [])
 
-    def test_missing_id(self):
+    def test_missing_post_id(self):
         data = [{'cats': ['Tech']}]
         errors = validate_suggestions(data)
-        self.assertTrue(any('missing "id"' in e for e in errors))
+        self.assertTrue(any('missing "post_id"' in e for e in errors))
 
     def test_missing_cats(self):
-        data = [{'id': 1}]
+        data = [{'post_id': 1}]
         errors = validate_suggestions(data)
         self.assertTrue(any('missing "cats"' in e for e in errors))
 
     def test_cats_wrong_type(self):
-        data = [{'id': 1, 'cats': 'Tech'}]
+        data = [{'post_id': 1, 'cats': 'Tech'}]
         errors = validate_suggestions(data)
         self.assertTrue(any('"cats" must be list' in e for e in errors))
 

@@ -31,7 +31,7 @@ Export to `data/export/categories.json`:
 Export to `data/export/posts.json`:
 ```json
 [{
-  "id": 123,
+  "post_id": 123,
   "title": "Post Title",
   "date": "2024-01-15 10:30:00",
   "content": "Full post content with HTML stripped...",

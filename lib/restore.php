@@ -191,7 +191,7 @@ foreach ( $backup['post_categories'] as $pc ) {
 		if ( isset( $slug_to_id[ $slug ] ) ) {
 			$target_ids[] = $slug_to_id[ $slug ];
 		} else {
-			WP_CLI::warning( "Category slug '$slug' not found for post $current_post_id" );
+			WP_CLI::warning( "Category slug '$slug' not found for post ID $current_post_id" );
 			++$error_count;
 		}
 	}

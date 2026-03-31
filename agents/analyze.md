@@ -31,12 +31,12 @@ will include both names and slugs — always output the slug.
 
 ```json
 [{
-  "id": 123,
+  "post_id": 123,
   "cats": ["wordpress", "open-source"],
   "new_cats": [],
   "confidence": "high"
 }, {
-  "id": 456,
+  "post_id": 456,
   "cats": ["personal"],
   "new_cats": ["photography"],
   "confidence": "medium"

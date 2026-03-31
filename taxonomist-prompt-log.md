@@ -70,3 +70,13 @@ check out the transcript in /Users/matt/Downloads/2026-03-31-173113-start.txt an
 ```
 
 ---
+## 2026-03-31 08:06:03
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+when we say "post 123" it's not clear it's a post ID, so let's make sure all our logs and everything specify post ID
+```
+
+---

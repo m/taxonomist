@@ -107,7 +107,7 @@ def validate_export(posts):
         return ['Export must be a JSON array']
 
     required_fields = {
-        'id': int,
+        'post_id': int,
         'title': str,
         'date': str,
         'content': str,
@@ -120,10 +120,10 @@ def validate_export(posts):
             continue
         for field, expected_type in required_fields.items():
             if field not in post:
-                errors.append(f'Post {post.get("id", f"index {i}")}: missing "{field}"')
+                errors.append(f'Post ID {post.get("post_id", f"index {i}")}: missing "{field}"')
             elif not isinstance(post[field], expected_type):
                 errors.append(
-                    f'Post {post.get("id", f"index {i}")}: '
+                    f'Post ID {post.get("post_id", f"index {i}")}: '
                     f'"{field}" should be {expected_type.__name__}, '
                     f'got {type(post[field]).__name__}'
                 )
@@ -135,7 +135,7 @@ def validate_suggestions(suggestions):
     """
     Validate that a suggestions JSON has the expected structure.
 
-    Each entry must have an integer "id" and a list "cats".
+    Each entry must have an integer "post_id" and a list "cats".
     "new_cats" is optional.
 
     Args:
@@ -152,14 +152,14 @@ def validate_suggestions(suggestions):
         if not isinstance(entry, dict):
             errors.append(f'Entry at index {i} is not an object')
             continue
-        if 'id' not in entry:
-            errors.append(f'Entry at index {i}: missing "id"')
-        elif not isinstance(entry['id'], int):
-            errors.append(f'Entry at index {i}: "id" must be int')
+        if 'post_id' not in entry:
+            errors.append(f'Entry at index {i}: missing "post_id"')
+        elif not isinstance(entry['post_id'], int):
+            errors.append(f'Entry at index {i}: "post_id" must be int')
         if 'cats' not in entry:
-            errors.append(f'Entry {entry.get("id", f"index {i}")}: missing "cats"')
+            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: missing "cats"')
         elif not isinstance(entry['cats'], list):
-            errors.append(f'Entry {entry.get("id", f"index {i}")}: "cats" must be list')
+            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "cats" must be list')
 
     return errors
 

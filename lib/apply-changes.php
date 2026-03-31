@@ -19,7 +19,7 @@
  *
  * Environment variables:
  *   TAXONOMIST_SUGGESTIONS  Path to the suggestions JSON file. Required.
- *                           Format: [{"id": 123, "cats": ["WordPress", "ai"]}, ...]
+ *                           Format: [{"post_id": 123, "cats": ["WordPress", "ai"]}, ...]
  *                           Values in "cats" are category slugs.
  *   TAXONOMIST_LOG          Path for the change log TSV.
  *                           Default: /tmp/taxonomist-changes.tsv
@@ -113,7 +113,7 @@ $skipped     = 0;
 $error_count = 0;
 
 foreach ( $suggestions as $suggestion ) {
-	$current_post_id = $suggestion['id'];
+	$current_post_id = isset( $suggestion['post_id'] ) ? $suggestion['post_id'] : $suggestion['id'];
 	$suggested_refs  = isset( $suggestion['cats'] ) ? $suggestion['cats'] : array();
 
 	if ( empty( $suggested_refs ) ) {
@@ -213,7 +213,7 @@ foreach ( $suggestions as $suggestion ) {
 	);
 	if ( false === $log_result ) {
 		fclose( $log ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
-		WP_CLI::error( "Failed to write to log at post $current_post_id. Aborting to prevent un-logged changes." );
+		WP_CLI::error( "Failed to write to log at post ID $current_post_id. Aborting to prevent un-logged changes." );
 	}
 
 	if ( 'apply' === $apply_mode ) {
