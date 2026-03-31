@@ -58,10 +58,26 @@ curl -X POST -u user:pass {url}/wp-json/wp/v2/categories -d '{"name":"...","slug
 Pattern: get posts in source → add target to each → remove source from each → delete source term.
 Log every post touched.
 
-### Set Post Categories
+### Set Post Categories (bulk)
+
+**You MUST use `lib/apply-changes.php` for bulk category updates. Do not write inline PHP loops — the script handles paginated processing, secure TSV logging, slug resolution, and taxonomy drift detection.**
+
 ```bash
-# WP-CLI (via eval for bulk operations)
-wp eval 'wp_set_post_categories($post_id, $cat_ids);'
+# Preview what would change (default mode)
+TAXONOMIST_SUGGESTIONS=/path/to/suggestions.json \
+TAXONOMIST_LOG=/path/to/changes.tsv \
+wp eval-file lib/apply-changes.php
+
+# Apply for real
+TAXONOMIST_MODE=apply \
+TAXONOMIST_SUGGESTIONS=/path/to/suggestions.json \
+TAXONOMIST_LOG=/path/to/changes.tsv \
+TAXONOMIST_REMOVE_CATS=asides \
+wp eval-file lib/apply-changes.php
+```
+
+For individual post updates via REST API:
+```bash
 # REST API
 curl -X POST -u user:pass {url}/wp-json/wp/v2/posts/{id} -d '{"categories":[1,2,3]}'
 # WordPress.com API (uses category names, not IDs)

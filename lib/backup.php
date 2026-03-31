@@ -58,22 +58,38 @@ foreach ( $terms as $t ) {
 }
 
 // Export every published post's category assignments.
-// We fetch in chunks to avoid memory exhaustion on large sites.
-$post_cats      = array();
-$posts_per_page = 200;
-$current_page   = 1;
+// Uses keyset pagination (ID > last_id) instead of offset-based paging
+// to prevent data loss if posts change during the backup.
+$post_cats  = array();
+$batch_size = 200;
+$last_id    = 0;
 
 while ( true ) {
-	$all_posts = get_posts(
-		array(
-			'posts_per_page' => $posts_per_page,
-			'paged'          => $current_page,
-			'post_status'    => 'publish',
-			'post_type'      => 'post',
-			'orderby'        => 'ID',
-			'order'          => 'ASC',
-		)
+	$query_args = array(
+		'posts_per_page'   => $batch_size,
+		'post_status'      => 'publish',
+		'post_type'        => 'post',
+		'orderby'          => 'ID',
+		'order'            => 'ASC',
+		'suppress_filters' => false,
 	);
+
+	if ( $last_id > 0 ) {
+		add_filter(
+			'posts_where',
+			$keyset_filter = function ( $where ) use ( $last_id ) {
+				global $wpdb;
+				return $where . $wpdb->prepare( " AND {$wpdb->posts}.ID > %d", $last_id );
+			}
+		);
+	}
+
+	$all_posts = get_posts( $query_args );
+
+	if ( isset( $keyset_filter ) ) {
+		remove_filter( 'posts_where', $keyset_filter );
+		unset( $keyset_filter );
+	}
 
 	if ( empty( $all_posts ) ) {
 		break;
@@ -91,8 +107,8 @@ while ( true ) {
 		);
 	}
 
+	$last_id = $all_posts[ count( $all_posts ) - 1 ]->ID;
 	wp_cache_flush();
-	++$current_page;
 }
 
 // Capture the default category setting so restore can reset it.

@@ -89,15 +89,33 @@ foreach ( $backup['categories'] as $category ) {
 		}
 		$slug_to_id[ $slug ] = $existing->term_id;
 	} else {
-		// Category was deleted — recreate it (without parent for now).
-		$result = wp_insert_term(
-			$category['name'],
+		// Category was deleted — recreate it without parent for now.
+		// WordPress enforces name uniqueness per parent level. Since we
+		// insert at root first (parent=0) and fix hierarchy in Step 2,
+		// a name collision can occur if the live site already has a
+		// root-level category with the same name. Use a temporary name
+		// to guarantee insertion, then fix it when we set the parent.
+		$temp_name = $category['name'];
+		$result    = wp_insert_term(
+			$temp_name,
 			'category',
 			array(
 				'slug'        => $category['slug'],
 				'description' => $category['description'],
 			)
 		);
+		if ( is_wp_error( $result ) && 'term_exists' === $result->get_error_code() ) {
+			// Name collision at root level — use a temporary unique name.
+			$temp_name = $category['name'] . '-taxonomist-' . uniqid();
+			$result    = wp_insert_term(
+				$temp_name,
+				'category',
+				array(
+					'slug'        => $category['slug'] . '-taxonomist-' . uniqid(),
+					'description' => $category['description'],
+				)
+			);
+		}
 		if ( ! is_wp_error( $result ) ) {
 			$slug_to_id[ $slug ] = $result['term_id'];
 			++$created;
@@ -131,10 +149,29 @@ foreach ( $backup['categories'] as $category ) {
 		}
 	}
 
-	// Check if parent needs updating.
+	// Update parent, and also fix name/slug back to backup values.
+	// Step 1 may have used a temporary name to avoid root-level collisions
+	// — now that the parent is correct, the real name is safe to restore.
 	$current_term = get_term( $current_id, 'category' );
-	if ( $current_term && (int) $current_term->parent !== $target_parent_id ) {
-		wp_update_term( $current_id, 'category', array( 'parent' => $target_parent_id ) );
+	if ( ! $current_term ) {
+		continue;
+	}
+
+	$needs_fix = (
+		(int) $current_term->parent !== $target_parent_id ||
+		$current_term->name !== $category['name'] ||
+		$current_term->slug !== $category['slug']
+	);
+	if ( $needs_fix ) {
+		wp_update_term(
+			$current_id,
+			'category',
+			array(
+				'parent' => $target_parent_id,
+				'name'   => $category['name'],
+				'slug'   => $category['slug'],
+			)
+		);
 		++$hierarchy_fixed;
 	}
 }
@@ -166,6 +203,7 @@ foreach ( $backup['post_categories'] as $pc ) {
 
 	if ( 0 === $restored % 500 && $restored > 0 ) {
 		WP_CLI::log( "Restored $restored posts..." );
+		wp_cache_flush();
 	}
 }
 

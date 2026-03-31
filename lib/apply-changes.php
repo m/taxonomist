@@ -154,10 +154,9 @@ foreach ( $suggestions as $suggestion ) {
 	}
 
 	// Merge: union of kept existing + new suggestions.
+	// If empty (all categories removed and no suggestions), WordPress will
+	// assign the default category — this is correct native behavior.
 	$new_ids = array_values( array_unique( array_merge( array_values( $kept_ids ), $suggested_ids ) ) );
-	if ( empty( $new_ids ) ) {
-		continue;
-	}
 
 	// Skip if nothing changed.
 	$sorted_current = $current_ids;
@@ -194,9 +193,11 @@ foreach ( $suggestions as $suggestion ) {
 		}
 	}
 
-	// Write the change to the log before applying.
-	$ts = gmdate( 'Y-m-d H:i:s' );
-	fputcsv(
+	// Write the change to the log BEFORE applying. If logging fails,
+	// abort immediately — applying changes without a log breaks the
+	// reversibility contract.
+	$ts         = gmdate( 'Y-m-d H:i:s' );
+	$log_result = fputcsv(
 		$log,
 		array(
 			$ts,
@@ -210,6 +211,10 @@ foreach ( $suggestions as $suggestion ) {
 		),
 		"\t"
 	);
+	if ( false === $log_result ) {
+		fclose( $log ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose
+		WP_CLI::error( "Failed to write to log at post $current_post_id. Aborting to prevent un-logged changes." );
+	}
 
 	if ( 'apply' === $apply_mode ) {
 		wp_set_post_categories( $current_post_id, $new_ids );
@@ -218,6 +223,7 @@ foreach ( $suggestions as $suggestion ) {
 	++$changes;
 	if ( 0 === $changes % 200 ) {
 		WP_CLI::log( "Processed $changes changes..." );
+		wp_cache_flush();
 	}
 }
 

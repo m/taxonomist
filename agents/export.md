@@ -45,13 +45,15 @@ Export to `data/export/posts.json`:
 ## Export Methods
 
 ### WP-CLI (SSH or local)
-Use a PHP script via `wp eval-file` that streams posts to a file to avoid memory issues:
 
-```php
-$fp = fopen("posts.json", "w");
-fwrite($fp, "[");
-$posts = get_posts(["numberposts"=>-1, "post_status"=>"publish", "post_type"=>"post"]);
-// ... stream each post as JSON
+**You MUST use the provided scripts. Do not write inline PHP loops.**
+
+```bash
+# Export posts — paginated, memory-safe, includes category slugs
+TAXONOMIST_OUTPUT=/path/to/posts.json wp eval-file lib/export-posts.php
+
+# Backup taxonomy state — paginated, includes default_category
+TAXONOMIST_OUTPUT=/path/to/backup.json wp eval-file lib/backup.php
 ```
 
 ### REST API

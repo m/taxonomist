@@ -41,23 +41,45 @@ $output_file = getenv( 'TAXONOMIST_OUTPUT' ) ? getenv( 'TAXONOMIST_OUTPUT' ) : '
 $fp = fopen( $output_file, 'w' );
 fwrite( $fp, "[\n" );
 
-// Fetch published posts in chunks to avoid memory exhaustion.
-$posts_per_page = 100;
-$current_page   = 1;
+// Fetch published posts in chunks using keyset pagination.
+// We track the last ID and query for ID > last_id instead of using
+// offset-based paging. This prevents data loss if posts are deleted
+// or unpublished while the export is running (offset pagination can
+// skip posts when rows shift across page boundaries).
+$batch_size     = 100;
+$last_id        = 0;
 $total_exported = 0;
 $first          = true;
 
 while ( true ) {
 	$query_args = array(
-		'posts_per_page' => $posts_per_page,
-		'paged'          => $current_page,
-		'post_status'    => 'publish',
-		'post_type'      => 'post',
-		'orderby'        => 'ID',
-		'order'          => 'ASC',
+		'posts_per_page'   => $batch_size,
+		'post_status'      => 'publish',
+		'post_type'        => 'post',
+		'orderby'          => 'ID',
+		'order'            => 'ASC',
+		'suppress_filters' => false,
 	);
 
+	// Keyset pagination: fetch posts with ID greater than the last one we saw.
+	if ( $last_id > 0 ) {
+		$query_args['post__not_in'] = array(); // Reset any exclusions.
+		// Use a direct where clause via post filter for reliable keyset pagination.
+		add_filter(
+			'posts_where',
+			$keyset_filter = function ( $where ) use ( $last_id ) {
+				global $wpdb;
+				return $where . $wpdb->prepare( " AND {$wpdb->posts}.ID > %d", $last_id );
+			}
+		);
+	}
+
 	$all_posts = get_posts( $query_args );
+
+	if ( isset( $keyset_filter ) ) {
+		remove_filter( 'posts_where', $keyset_filter );
+		unset( $keyset_filter );
+	}
 
 	if ( empty( $all_posts ) ) {
 		break;
@@ -103,9 +125,11 @@ while ( true ) {
 		}
 	}
 
-	// Crucial: flush WordPress's internal cache after each page to free up memory.
+	// Track the highest ID for keyset pagination.
+	$last_id = $all_posts[ count( $all_posts ) - 1 ]->ID;
+
+	// Flush WordPress's internal cache after each batch to free up memory.
 	wp_cache_flush();
-	++$current_page;
 }
 
 fwrite( $fp, "\n]" );
