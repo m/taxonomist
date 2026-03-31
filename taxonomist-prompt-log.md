@@ -290,3 +290,13 @@ how can we also set it based on the read limits, which may be different in diffe
 ```
 
 ---
+## 2026-03-31 09:09:42
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+how are we checking the default post category and making sure not to delete it?
+```
+
+---

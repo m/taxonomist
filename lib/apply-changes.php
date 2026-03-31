@@ -81,6 +81,18 @@ foreach ( $remove_slugs as $slug ) {
 	}
 }
 
+// Safety check: refuse to strip the default category. If the user wants to
+// retire the default, they must change the default_category setting first.
+$default_cat_id = (int) get_option( 'default_category' );
+if ( in_array( $default_cat_id, $remove_ids, true ) ) {
+	$default_term = get_term( $default_cat_id, 'category' );
+	$default_name = $default_term ? $default_term->name : "ID $default_cat_id";
+	WP_CLI::error(
+		"TAXONOMIST_REMOVE_CATS includes '$default_name' which is the site's default category. " .
+		'Change the default category setting first (wp option update default_category NEW_ID), then retry.'
+	);
+}
+
 // Pre-flight check: verify all suggested slugs exist in the live taxonomy.
 // Abort early if there are unresolved references — this prevents silent
 // data loss from taxonomy drift between export and apply.

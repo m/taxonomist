@@ -207,6 +207,8 @@ Present the plan and descriptions together as a single table so the user can see
 └──────────────────┴───────┴──────────────────────────┴──────────────────────────────────────┘
 ```
 
+Mark the site's **default category** in the table with `[DEFAULT]`. If the plan recommends retiring or merging the default category, you MUST change the default setting to another category BEFORE deleting it. Call this out explicitly in the plan.
+
 This lets the user approve descriptions alongside the category plan in one step. Apply approved descriptions before making any post changes:
 
 ```bash
