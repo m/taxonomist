@@ -40,6 +40,7 @@ This is a Claude Code tool. Users download this repo, open it with Claude Code, 
 - **Iterative**: The user approves every phase before the next one begins
 - **Dry-run first**: Destructive operations are always previewed before execution
 - **Parallel processing**: Posts are analyzed in batches using parallel agents for speed
+- **Use AskUserQuestion**: Whenever you need a decision from the user, use the AskUserQuestion tool with selectable options instead of asking them to type a response. This includes choosing connection methods, approving plans, selecting categories to keep/merge/retire, and confirming changes. Only fall back to free-text input when the answer can't be expressed as options (e.g., entering a URL or password).
 
 ## Configuration
 
