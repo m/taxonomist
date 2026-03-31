@@ -15,23 +15,29 @@ All configuration should happen through the conversation. Ask for credentials in
 ## Steps
 
 1. Ask for the site URL if not provided
-2. Probe the site — check WordPress.com first:
+2. **Detect the admin URL** — the site URL and wp-admin URL can differ:
+   - Try `{url}/wp-json/` first. If it works, the REST API base is at that URL.
+   - If not, try common alternatives: `{url}/blog/wp-json/`, `{url}/wordpress/wp-json/`
+   - Check the HTML of the site homepage for `<link rel="https://api.w.org/"` which reveals the actual REST API URL
+   - `curl -s {url}/ | grep -o 'https://api.w.org/[^"]*'` extracts it
+   - The REST API URL tells you where wp-admin lives (same base path)
+3. Probe the site — check WordPress.com first:
    - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` — if this returns site info, it's a WordPress.com site (hosted or Jetpack-connected). **Go straight to the WordPress.com OAuth flow.** Do NOT try password grant, Basic auth, or Application Passwords — they don't work for WordPress.com hosted sites.
    - If not WordPress.com, check self-hosted methods:
-     - REST API: `curl -s {url}/wp-json/wp/v2/categories | head -c 200`
+     - REST API: `curl -s {api_url}/wp/v2/categories | head -c 200`
      - If user mentions SSH: `ssh {user}@{host} "which wp"`
      - XML-RPC (last resort): `curl -s {url}/xmlrpc.php`
-3. Based on what's available, recommend the best method:
+4. Based on what's available, recommend the best method:
    - WordPress.com sites → WordPress.com OAuth (always)
    - Self-hosted with SSH → WP-CLI over SSH
-   - Self-hosted without SSH → REST API + Application Passwords
+   - Self-hosted without SSH → REST API + Application Password (use the authorize-application flow below)
    - XML-RPC is last resort (limited, being deprecated)
-4. Walk the user through authentication:
+5. Walk the user through authentication:
    - Ask for credentials directly in the conversation
    - Never tell the user to edit config.json themselves
    - Never show credentials in curl commands — write them to config.json and read from there
-5. Test the connection by listing categories
-6. Write config.json automatically with the working credentials
+6. Test the connection by listing categories
+7. Write config.json automatically with the working credentials
 
 ## Connection Method Details
 
@@ -65,26 +71,41 @@ Test: `wp --path={wp_path} option get blogname`
 
 ### REST API + Application Password
 
-For **self-hosted WordPress** sites (not WordPress.com), Application Passwords are built into WordPress 5.6+. Guide the user:
+For **self-hosted WordPress** sites (WordPress 5.6+). Uses the browser-based authorize-application flow — same frictionless experience as the WordPress.com OAuth flow.
 
+**IMPORTANT:** The authorize URL uses wp-admin, which may be at a different path than the site URL. Detect the correct admin URL first (see step 2 above).
+
+**Automated flow (preferred):**
+
+1. Start a local HTTP server on port 19823 to capture the callback
+2. Open the user's browser to the authorize URL:
+   ```
+   {admin_url}/authorize-application.php?app_name=Taxonomist&success_url=http://localhost:19823/
+   ```
+3. User logs into wp-admin (if needed) and clicks "Yes, I approve of this connection"
+4. WordPress redirects to `http://localhost:19823/?user_login=USERNAME&password=xxxx+xxxx+xxxx+xxxx`
+5. Local server captures the username and app password from the URL parameters
+6. Save to config.json and test
+
+The `success_url` MUST include the trailing slash. URL-decode the password (spaces come as `+`).
+
+**Fallback:** If the automated flow fails, ask the user to:
 1. Go to **Users → Profile** in wp-admin
-2. Scroll to "Application Passwords"
-3. Enter "Taxonomist" as the name and click "Add New Application Password"
-4. Copy the generated password and paste it here in the chat
-
-For **WordPress.com** sites, Application Passwords require Two-Step Authentication to be enabled first. Use the OAuth flow instead (see WordPress.com section below).
+2. Scroll to "Application Passwords", enter "Taxonomist", click "Add New"
+3. Paste the generated password in the chat
 
 ```json
 {
   "site_url": "https://example.com",
   "connection": {
     "method": "rest-api",
+    "api_url": "https://example.com/wp-json",
     "username": "admin",
     "app_password": "xxxx xxxx xxxx xxxx xxxx xxxx"
   }
 }
 ```
-Test: `curl -s -u {username}:{app_password} {url}/wp-json/wp/v2/categories?per_page=1`
+Test: `curl -s -u {username}:{app_password} {api_url}/wp/v2/categories?per_page=1`
 
 ### REST API + JWT
 ```json

@@ -160,3 +160,43 @@ check /tmp/claude_prompt_final.txt
 ```
 
 ---
+## 2026-03-31 08:30:11
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+give me a prompt to paste into codex so it can check everything
+```
+
+---
+## 2026-03-31 08:31:11
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+don't have me paste codebase, have it look at the local projects directory, and copy prompt to clipboard
+```
+
+---
+## 2026-03-31 08:38:49
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+read this, should we try getting wp-admin application password via the rest api? https://developer.wordpress.org/rest-api/reference/application-passwords/
+```
+
+---
+## 2026-03-31 08:39:46
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+sometimes site url and admin url is different, let's make sure we use the correct one
+```
+
+---
