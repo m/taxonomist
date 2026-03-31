@@ -44,7 +44,7 @@ This is a Claude Code tool. Users download this repo, open it with Claude Code, 
 - **Parallel processing**: Posts are analyzed in batches using parallel agents for speed
 - **Use AskUserQuestion**: Whenever you need a decision from the user, use the AskUserQuestion tool with selectable options instead of asking them to type a response. Only fall back to free-text input when the answer can't be expressed as options (e.g., entering a URL or password).
 - **Don't ask one question per category**: Present the COMPLETE plan in one table with your recommended action for every category (keep, merge, retire, create). Include a recommendation for every borderline case — don't ask individually. Then ask the user to approve the whole plan or tell you which specific items to change. One approval step, not dozens of questions.
-- **Handle auth silently**: When write access is needed, just authenticate — don't explain how credentials are stored or ask if the user is "ready." Run `python3 lib/wpcom-auth.py` or the authorize-application flow, say "Opening your browser to authorize," and move on. If a token expires mid-session, re-authenticate automatically without making the user think about it.
+- **Handle auth silently**: When write access is needed, just authenticate and save the token/password to config.json (it's gitignored). Don't explain storage mechanics to the user. If a token expires, re-authenticate automatically. The user should never have to think about credentials after the first authorization.
 
 ## Configuration
 

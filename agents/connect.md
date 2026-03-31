@@ -35,21 +35,21 @@ All configuration should happen through the conversation. Ask for credentials in
 5. Walk the user through authentication:
    - Ask for credentials directly in the conversation
    - Never tell the user to edit config.json themselves
-   - **Never write credentials to disk.** Store tokens and passwords in environment variables for the session only. Use `export TAXONOMIST_TOKEN=...` or `export TAXONOMIST_APP_PASSWORD=...` so they exist in memory and vanish when the terminal closes.
-   - Never show credentials in curl commands — read from env vars (e.g., `curl -H "Authorization: Bearer $TAXONOMIST_TOKEN"`)
+   - Save credentials to config.json — it's gitignored so it never gets committed
+   - Never show credentials in curl output — read from config.json
 6. Test the connection by listing categories
-7. Write config.json with connection method and site info only — no secrets:
+7. Write config.json with everything needed to reconnect without re-authenticating:
    ```json
    {
      "site_url": "https://example.com",
      "connection": {
        "method": "rest-api",
        "api_url": "https://example.com/wp-json",
-       "username": "admin"
+       "username": "admin",
+       "app_password": "xxxx xxxx xxxx xxxx"
      }
    }
    ```
-   Credentials come from env vars at runtime, not the config file.
 
 ## Connection Method Details
 
@@ -106,22 +106,19 @@ The `success_url` MUST include the trailing slash. URL-decode the password (spac
 2. Scroll to "Application Passwords", enter "Taxonomist", click "Add New"
 3. Paste the generated password in the chat
 
-After capturing credentials, set them as env vars:
-```bash
-export TAXONOMIST_APP_PASSWORD="xxxx xxxx xxxx xxxx xxxx xxxx"
-```
-
+Save everything to config.json (gitignored):
 ```json
 {
   "site_url": "https://example.com",
   "connection": {
     "method": "rest-api",
     "api_url": "https://example.com/wp-json",
-    "username": "admin"
+    "username": "admin",
+    "app_password": "xxxx xxxx xxxx xxxx"
   }
 }
 ```
-Test: `curl -s -u "admin:$TAXONOMIST_APP_PASSWORD" {api_url}/wp/v2/categories?per_page=1`
+Test by reading credentials from config: `python3 -c "import json; c=json.load(open('config.json'))['connection']; print(c['username'], c['app_password'])"` then use in curl.
 
 ### REST API + JWT
 ```json
@@ -173,18 +170,14 @@ The script prints the token to stdout. Capture it and save to config.json. The u
 
 If the local server can't bind (port in use), the script falls back to asking the user to paste the code from their browser URL bar.
 
-After capturing the token, set it as an env var:
-```bash
-export TAXONOMIST_TOKEN="the_token_value"
-```
-
-Save config (no secrets on disk):
+Save token to config.json (gitignored):
 ```json
 {
   "site_url": "https://example.wordpress.com",
   "connection": {
     "method": "wpcom-api",
-    "site_id": "YOUR_SITE_ID"
+    "site_id": "YOUR_SITE_ID",
+    "access_token": "THE_TOKEN"
   }
 }
 ```
@@ -193,12 +186,12 @@ Save config (no secrets on disk):
 
 **Scopes:** The token has global scope and works for any site the user has access to.
 
-Test: `curl -s -H "Authorization: Bearer $TAXONOMIST_TOKEN" 'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories?number=5'`
+Test by reading token from config and curling the API.
 
 ## Important
 
-- Never store passwords in plain text in config.json — use application passwords or tokens
-- Test the connection before writing config
+- config.json is gitignored — credentials stay local, never committed
+- Test the connection before finalizing config
 - Verify write access (not just read) by checking if the user has edit_posts capability
 - Connection method preference: WP-CLI SSH > WP-CLI local > WordPress.com API > REST API + App Password > REST API + JWT > XML-RPC
 - For WordPress.com hosted sites, the WordPress.com API is the natural choice

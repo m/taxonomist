@@ -300,3 +300,23 @@ how are we checking the default post category and making sure not to delete it?
 ```
 
 ---
+## 2026-03-31 09:18:04
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+how can we avoid this? [Image #4]
+```
+
+---
+## 2026-03-31 09:18:47
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+no don't redo getting it, let's just save it somewhere better
+```
+
+---
