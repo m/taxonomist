@@ -1,24 +1,21 @@
 """
 WordPress.com OAuth2 authorization flow for CLI tools.
 
-Starts a local HTTP server, opens the authorization page in the user's
-default browser, captures the redirect with the auth code, exchanges it
-for a bearer token, and prints the token to stdout.
+Starts a local HTTP server on port 19823, opens the WordPress.com
+authorization page in the user's default browser, captures the
+redirect with the auth code, exchanges it for a bearer token, and
+prints the token to stdout.
 
 Usage:
-    python3 lib/wpcom-auth.py [site_domain]
-
-    site_domain  Optional. If provided, the token will be scoped to this
-                 site (passed as &blog= parameter). Example: "ma.tt"
+    python3 lib/wpcom-auth.py
 
 Exit codes:
     0  Success — token printed to stdout (last line)
     1  Authorization failed or timed out
 
-The script tries ports 19823, 19824, 19825 to avoid conflicts. The
-registered redirect URI is http://localhost — WordPress.com ignores the
-port for native apps, but if that fails the script falls back to asking
-the user to paste the code manually.
+The token has global scope and works for any site the user has access
+to. If port 19823 is unavailable, the script falls back to asking the
+user to paste the code from their browser's URL bar.
 """
 
 import http.server
@@ -70,19 +67,20 @@ def exchange_code(code):
 
 
 def main():
-    site = sys.argv[1] if len(sys.argv) > 1 else None
     auth_code = None
     server = None
 
     # Build the authorization URL.
+    # Note: do NOT include a "blog" parameter here — that triggers
+    # Jetpack's separate auth flow for self-hosted sites, which
+    # redirects to the site's wp-login.php instead of back to us.
+    # The token we get works for any site the user has access to.
     params = {
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
         "scope": "global",
     }
-    if site:
-        params["blog"] = site
 
     auth_url = (
         "https://public-api.wordpress.com/oauth2/authorize?"
