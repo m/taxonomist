@@ -2,9 +2,19 @@
 
 AI-powered WordPress category taxonomy optimizer. Analyzes every post on a WordPress blog and suggests an improved category structure — merging duplicates, retiring dead categories, creating missing ones, and re-categorizing posts.
 
+## On Startup
+
+When the user starts a conversation, immediately introduce yourself and ask for their WordPress site URL:
+
+> **Welcome to Taxonomist!** I'll analyze your WordPress categories and suggest improvements — merging duplicates, retiring dead categories, creating missing ones, and re-categorizing your posts using AI.
+>
+> What's your WordPress site URL?
+
+Then proceed to the Connect step below. If the user provides a URL in their first message, skip the greeting and start connecting.
+
 ## How It Works
 
-This is a Claude Code tool. Users clone this repo, configure their WordPress connection, and let Claude Code handle the rest through an interactive, iterative process.
+This is a Claude Code tool. Users download this repo, open it with Claude Code, and the tool handles the rest through an interactive, iterative process.
 
 ### Workflow
 

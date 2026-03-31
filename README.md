@@ -9,10 +9,10 @@ Analyzes every post on your WordPress blog and suggests an improved category str
 ```bash
 curl -sL https://github.com/m/taxonomist/archive/main.tar.gz | tar xz
 cd taxonomist-main
-claude
+claude "Optimize my WordPress categories at MYSITE.COM"
 ```
 
-That's it. [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) first if you haven't already, then tell Claude which site to optimize.
+Replace `MYSITE.COM` with your site. [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) first if you haven't already.
 
 ## What It Does
 
