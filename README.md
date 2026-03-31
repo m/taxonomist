@@ -46,6 +46,10 @@ Every change is logged and reversible. Full backup before any modifications. Dry
 
 Posts are exported locally and split into batches. Parallel AI agents analyze the full content of every post and suggest optimal categories. Results are aggregated, reviewed with you, and applied via WP-CLI or REST API.
 
+## Thanks
+
+Thanks to Automattician [Arun Sathiya](https://github.com/arunsathiya) for help testing.
+
 ## License
 
 [GPLv2 or later](LICENSE), same as WordPress.
