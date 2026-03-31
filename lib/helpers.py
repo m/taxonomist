@@ -13,9 +13,15 @@ import os
 from collections import Counter
 
 
-MAX_BATCH_TOKENS = 8000  # Stay under the 10K Read tool limit with headroom.
+# Token limit for agent Read tool. Override via TAXONOMIST_MAX_BATCH_TOKENS env var.
+# Default 8000 gives headroom under the typical 10K limit. The export agent
+# should call probe_read_limit() to discover the actual limit at runtime and
+# set this via environment variable before calling write_batches().
+MAX_BATCH_TOKENS = int(os.environ.get('TAXONOMIST_MAX_BATCH_TOKENS', '8000'))
 CHARS_PER_TOKEN = 4      # Conservative estimate for English text.
 MAX_BATCH_CHARS = MAX_BATCH_TOKENS * CHARS_PER_TOKEN
+
+
 
 
 def estimate_post_size(post):
@@ -96,7 +102,27 @@ def write_batches(posts, batch_dir, batch_size=None):
         with open(path, 'w') as f:
             json.dump(batch, f)
         paths.append(path)
-    return paths
+    return paths, batch_size
+
+
+def check_largest_batch(batch_dir, max_chars=MAX_BATCH_CHARS):
+    """
+    Check whether the largest batch file fits under the token limit.
+
+    Returns (ok, largest_file, largest_chars). If ok is False, batches
+    need to be rewritten with a smaller batch size.
+    """
+    largest_chars = 0
+    largest_file = None
+    for f in sorted(os.listdir(batch_dir)):
+        if not f.endswith('.json'):
+            continue
+        path = os.path.join(batch_dir, f)
+        size = os.path.getsize(path)
+        if size > largest_chars:
+            largest_chars = size
+            largest_file = f
+    return largest_chars <= max_chars, largest_file, largest_chars
 
 
 def aggregate_results(results_dir):

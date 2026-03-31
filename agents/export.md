@@ -100,13 +100,29 @@ After exporting:
 
 **You MUST use `lib/helpers.py` for splitting posts into batches. Do not write inline Python scripts.**
 
+Batch size is calculated automatically from content length to stay under the Read tool token limit. After writing, verify the largest batch fits:
+
 ```python
-from lib.helpers import write_batches
+from lib.helpers import write_batches, check_largest_batch
 import json
 with open('data/export/posts.json') as f:
     posts = json.load(f)
-write_batches(posts, 'data/batches/', batch_size=50)
+paths, batch_size = write_batches(posts, 'data/batches/')
+ok, largest, size = check_largest_batch('data/batches/')
+print(f'Batch size: {batch_size}, largest file: {largest} ({size} chars), fits: {ok}')
 ```
+
+**After writing batches, verify the first one is readable:**
+1. Try to Read `data/batches/batch-000.json`
+2. If it succeeds, all batches should be fine (the auto-sizing is conservative)
+3. If it fails with a token limit error, halve the batch size and rewrite:
+```python
+os.environ['TAXONOMIST_MAX_BATCH_TOKENS'] = str(int(os.environ.get('TAXONOMIST_MAX_BATCH_TOKENS', '8000')) // 2)
+from importlib import reload
+import helpers; reload(helpers)
+paths, batch_size = helpers.write_batches(posts, 'data/batches/')
+```
+Repeat until the Read succeeds. This discovers the actual limit for the current environment.
 
 ## Backup
 

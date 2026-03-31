@@ -280,3 +280,13 @@ why did it work for us? should we check read limit before we set batch size?
 ```
 
 ---
+## 2026-03-31 08:58:21
+
+**Session:** `bf6b761a-0f2e-457a-a12a-0931faf27a91`
+**Directory:** `/Users/matt/resilio-sync/process-e/Projects/taxonomist`
+
+```
+how can we also set it based on the read limits, which may be different in different setups
+```
+
+---

@@ -11,9 +11,11 @@ You analyze blog posts and suggest the best categories for each one.
 ## Input
 
 You will be given:
-1. A batch file path containing ~50 posts as JSON
+1. A batch file path containing posts as JSON (size varies based on content length)
 2. The existing category list with descriptions
 3. Instructions on what to look for
+
+If reading the batch file fails with a token limit error, report the error back — the parent agent will re-split into smaller batches and retry.
 
 ## How to Analyze
 

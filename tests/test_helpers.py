@@ -110,14 +110,14 @@ class TestWriteBatches(unittest.TestCase):
     def test_creates_files(self):
         posts = [{'id': i, 'title': f'Post {i}'} for i in range(5)]
         with tempfile.TemporaryDirectory() as tmpdir:
-            paths = write_batches(posts, tmpdir, batch_size=2)
+            paths, batch_size = write_batches(posts, tmpdir, batch_size=2)
             self.assertEqual(len(paths), 3)
             self.assertTrue(all(os.path.exists(p) for p in paths))
 
     def test_file_naming(self):
         posts = [{'id': i} for i in range(5)]
         with tempfile.TemporaryDirectory() as tmpdir:
-            paths = write_batches(posts, tmpdir, batch_size=2)
+            paths, _ = write_batches(posts, tmpdir, batch_size=2)
             self.assertTrue(paths[0].endswith('batch-000.json'))
             self.assertTrue(paths[1].endswith('batch-001.json'))
             self.assertTrue(paths[2].endswith('batch-002.json'))
@@ -125,11 +125,17 @@ class TestWriteBatches(unittest.TestCase):
     def test_file_contents_valid_json(self):
         posts = [{'id': 1, 'title': 'Hello'}, {'id': 2, 'title': 'World'}]
         with tempfile.TemporaryDirectory() as tmpdir:
-            paths = write_batches(posts, tmpdir, batch_size=2)
+            paths, _ = write_batches(posts, tmpdir, batch_size=2)
             with open(paths[0]) as f:
                 loaded = json.load(f)
             self.assertEqual(len(loaded), 2)
             self.assertEqual(loaded[0]['id'], 1)
+
+    def test_returns_batch_size(self):
+        posts = [{'id': i} for i in range(10)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, batch_size = write_batches(posts, tmpdir, batch_size=3)
+            self.assertEqual(batch_size, 3)
 
     def test_creates_directory(self):
         posts = [{'id': 1}]
