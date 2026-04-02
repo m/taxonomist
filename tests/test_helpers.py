@@ -14,6 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 from helpers import (
+    _detect_orphans,
     aggregate_results,
     calculate_batch_size,
     parse_change_log,
@@ -844,11 +845,33 @@ class TestRenderCategoryTree(unittest.TestCase):
         self.assertIn('parent not found', result)
 
 
+    def test_string_ids_handled(self):
+        """WordPress APIs may return term_id and parent as strings."""
+        cats = [
+            {'term_id': '1', 'name': 'Parent', 'slug': 'parent', 'count': 10, 'parent': '0'},
+            {'term_id': '2', 'name': 'Child', 'slug': 'child', 'count': 5, 'parent': '1'},
+        ]
+        result = render_category_tree(cats)
+        self.assertIn('Parent (10)', result)
+        self.assertIn('Child (5)', result)
+        # Child should be nested, not at root with a warning.
+        self.assertNotIn('parent missing', result)
+
+    def test_circular_parent_handled(self):
+        cats = [
+            _cat(1, 'A', 'a', 10, parent=2),
+            _cat(2, 'B', 'b', 5, parent=1),
+        ]
+        result = render_category_tree(cats)
+        self.assertIn('circular', result)
+        self.assertIn('A (10)', result)
+        self.assertIn('B (5)', result)
+
+
 class TestDetectOrphans(unittest.TestCase):
     """Tests for orphan detection logic."""
 
     def test_no_orphans(self):
-        from helpers import _detect_orphans
         children_map = {'parent': ['child-a', 'child-b']}
         actions = {
             'parent': {'action': 'retire'},
@@ -859,8 +882,7 @@ class TestDetectOrphans(unittest.TestCase):
         self.assertEqual(len(orphaned), 0)
         self.assertEqual(len(counts), 0)
 
-    def test_one_orphan(self):
-        from helpers import _detect_orphans
+    def test_all_children_orphaned(self):
         children_map = {'parent': ['child-a', 'child-b']}
         actions = {'parent': {'action': 'retire'}}
         orphaned, counts = _detect_orphans(children_map, actions)
@@ -868,7 +890,6 @@ class TestDetectOrphans(unittest.TestCase):
         self.assertEqual(counts['parent'], 2)
 
     def test_merge_causes_orphans(self):
-        from helpers import _detect_orphans
         children_map = {'source': ['kid']}
         actions = {'source': {'action': 'merge', 'target': 'dest'}}
         orphaned, counts = _detect_orphans(children_map, actions)

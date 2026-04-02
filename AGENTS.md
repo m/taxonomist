@@ -256,11 +256,11 @@ Categories
 ├── WordPress (150)
 │   ├── Plugins (45)
 │   │   ├── WooCommerce (12)
-│   │   └── Akismet (2)                ✕ retire → plugins
+│   │   └── Akismet (2)  ✕ retire → plugins
 │   └── Themes (30)
-│       └── Full Site Editing           ★ new
+│       └── Full Site Editing  ★ new
 ├── Personal (89)
-└── WP (3)                              → merge into wordpress
+└── WP (3)  → merge into wordpress
 ```
 
 If the tree shows `⚠ orphaned` warnings, call these out to the user explicitly. Orphaned categories become root-level categories when their parent is retired — this may not be the intended outcome. Suggest re-parenting or including them in the plan.

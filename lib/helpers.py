@@ -485,7 +485,8 @@ def _build_tree(categories, actions=None):
     for cat in categories:
         slug = cat['slug']
         node_map[slug] = cat
-        id_to_slug[cat['term_id']] = slug
+        # Coerce to int: WordPress APIs may return string IDs.
+        id_to_slug[int(cat['term_id'])] = slug
 
     children_map = {}
     roots = []
@@ -494,7 +495,7 @@ def _build_tree(categories, actions=None):
     for cat in categories:
         slug = cat['slug']
         seen.add(slug)
-        parent_id = cat.get('parent', 0)
+        parent_id = int(cat.get('parent', 0))
         if parent_id == 0:
             roots.append(slug)
         else:
@@ -543,7 +544,7 @@ def _build_tree(categories, actions=None):
                 node_map[current] = {**node_map[current], '_warning': 'circular'}
                 break
             visited.add(current)
-            parent_id = node_map[current].get('parent', 0)
+            parent_id = int(node_map[current].get('parent', 0))
             current = id_to_slug.get(parent_id) if parent_id else None
 
     # Sort children by name, roots by name.
