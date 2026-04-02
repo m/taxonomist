@@ -17,6 +17,7 @@ from helpers import (
     aggregate_results,
     calculate_batch_size,
     parse_change_log,
+    render_category_tree,
     split_into_batches,
     validate_backup,
     validate_category_slugs,
@@ -643,6 +644,236 @@ class TestValidateCategorySlugs(unittest.TestCase):
         suggestions = [{'post_id': 1, 'cats': []}]
         check = validate_category_slugs(suggestions, {'tech'})
         self.assertTrue(check['valid'])
+
+
+def _cat(term_id, name, slug, count=0, parent=0):
+    """Shorthand for building a category dict in tests."""
+    return {
+        'term_id': term_id,
+        'name': name,
+        'slug': slug,
+        'count': count,
+        'parent': parent,
+    }
+
+
+class TestRenderCategoryTree(unittest.TestCase):
+    """Tests for hierarchy tree diff rendering."""
+
+    def test_empty_categories(self):
+        result = render_category_tree([])
+        self.assertEqual(result, '(no categories)')
+
+    def test_single_root_no_actions(self):
+        cats = [_cat(1, 'WordPress', 'wordpress', 150)]
+        result = render_category_tree(cats)
+        self.assertIn('WordPress (150)', result)
+
+    def test_flat_hierarchy(self):
+        cats = [
+            _cat(1, 'Tech', 'tech', 50),
+            _cat(2, 'Music', 'music', 30),
+            _cat(3, 'Personal', 'personal', 20),
+        ]
+        result = render_category_tree(cats)
+        self.assertIn('Categories', result)
+        self.assertIn('Tech (50)', result)
+        self.assertIn('Music (30)', result)
+        self.assertIn('Personal (20)', result)
+
+    def test_parent_child(self):
+        cats = [
+            _cat(1, 'WordPress', 'wordpress', 150),
+            _cat(2, 'Plugins', 'plugins', 45, parent=1),
+            _cat(3, 'Themes', 'themes', 30, parent=1),
+        ]
+        result = render_category_tree(cats)
+        self.assertIn('WordPress (150)', result)
+        self.assertIn('Plugins (45)', result)
+        self.assertIn('Themes (30)', result)
+        lines = result.split('\n')
+        wp_line = [i for i, l in enumerate(lines) if 'WordPress' in l][0]
+        plugins_line = [i for i, l in enumerate(lines) if 'Plugins' in l][0]
+        self.assertGreater(plugins_line, wp_line)
+
+    def test_deep_nesting(self):
+        cats = [
+            _cat(1, 'Level 1', 'l1', 10),
+            _cat(2, 'Level 2', 'l2', 8, parent=1),
+            _cat(3, 'Level 3', 'l3', 5, parent=2),
+            _cat(4, 'Level 4', 'l4', 2, parent=3),
+        ]
+        result = render_category_tree(cats)
+        self.assertIn('Level 4 (2)', result)
+        lines = result.split('\n')
+        level_lines = [i for i, l in enumerate(lines) if 'Level' in l]
+        self.assertEqual(len(level_lines), 4)
+        child_indents = []
+        for idx in level_lines[1:]:
+            line = lines[idx]
+            indent = len(line) - len(line.lstrip())
+            child_indents.append(indent)
+        for i in range(1, len(child_indents)):
+            self.assertGreater(child_indents[i], child_indents[i - 1])
+
+    def test_retire_annotation(self):
+        cats = [_cat(1, 'Akismet', 'akismet', 2)]
+        actions = {'akismet': {'action': 'retire', 'target': 'plugins'}}
+        result = render_category_tree(cats, actions)
+        self.assertIn('\u2715 retire', result)
+        self.assertIn('plugins', result)
+
+    def test_merge_annotation(self):
+        cats = [_cat(1, 'WP', 'wp', 3)]
+        actions = {'wp': {'action': 'merge', 'target': 'wordpress'}}
+        result = render_category_tree(cats, actions)
+        self.assertIn('\u2192 merge into wordpress', result)
+
+    def test_create_annotation(self):
+        cats = [_cat(1, 'WordPress', 'wordpress', 150)]
+        actions = {'ai': {'action': 'create', 'name': 'AI'}}
+        result = render_category_tree(cats, actions)
+        self.assertIn('\u2605 new', result)
+        self.assertIn('AI', result)
+
+    def test_create_with_parent(self):
+        cats = [
+            _cat(1, 'WordPress', 'wordpress', 150),
+            _cat(2, 'Themes', 'themes', 30, parent=1),
+        ]
+        actions = {
+            'full-site-editing': {
+                'action': 'create',
+                'name': 'Full Site Editing',
+                'parent_slug': 'themes',
+            }
+        }
+        result = render_category_tree(cats, actions)
+        self.assertIn('Full Site Editing', result)
+        lines = result.split('\n')
+        themes_line = next(i for i, l in enumerate(lines) if 'Themes' in l)
+        fse_line = next(i for i, l in enumerate(lines) if 'Full Site Editing' in l)
+        self.assertGreater(fse_line, themes_line)
+
+    def test_orphan_detection(self):
+        cats = [
+            _cat(1, 'Links', 'links', 23),
+            _cat(2, 'Blogroll', 'blogroll', 10, parent=1),
+            _cat(3, 'Resources', 'resources', 5, parent=1),
+        ]
+        actions = {'links': {'action': 'retire'}}
+        result = render_category_tree(cats, actions)
+        self.assertIn('\u26a0', result)
+        self.assertIn('orphaned', result)
+
+    def test_orphan_child_also_retired(self):
+        cats = [
+            _cat(1, 'Links', 'links', 23),
+            _cat(2, 'Blogroll', 'blogroll', 10, parent=1),
+        ]
+        actions = {
+            'links': {'action': 'retire'},
+            'blogroll': {'action': 'retire'},
+        }
+        result = render_category_tree(cats, actions)
+        self.assertNotIn('orphaned', result)
+
+    def test_missing_parent_id(self):
+        cats = [_cat(1, 'Orphan', 'orphan', 5, parent=999)]
+        result = render_category_tree(cats)
+        self.assertIn('Orphan (5)', result)
+        self.assertIn('parent missing', result)
+
+    def test_no_actions_plain_tree(self):
+        cats = [
+            _cat(1, 'Tech', 'tech', 50),
+            _cat(2, 'AI', 'ai', 10, parent=1),
+        ]
+        result = render_category_tree(cats)
+        self.assertIn('Tech (50)', result)
+        self.assertIn('AI (10)', result)
+        self.assertNotIn('\u2715', result)
+        self.assertNotIn('\u2605', result)
+        self.assertNotIn('\u2192 merge', result)
+
+    def test_deterministic_ordering(self):
+        cats = [
+            _cat(3, 'Zebra', 'zebra', 1),
+            _cat(1, 'Alpha', 'alpha', 2),
+            _cat(2, 'Middle', 'middle', 3),
+        ]
+        result1 = render_category_tree(cats)
+        result2 = render_category_tree(cats)
+        self.assertEqual(result1, result2)
+        lines = result1.split('\n')
+        positions = {}
+        for i, line in enumerate(lines):
+            for name in ('Alpha', 'Middle', 'Zebra'):
+                if name in line:
+                    positions[name] = i
+        self.assertLess(positions['Alpha'], positions['Middle'])
+        self.assertLess(positions['Middle'], positions['Zebra'])
+
+    def test_box_drawing_chars_present(self):
+        cats = [
+            _cat(1, 'Parent', 'parent', 10),
+            _cat(2, 'Child A', 'child-a', 5, parent=1),
+            _cat(3, 'Child B', 'child-b', 3, parent=1),
+        ]
+        result = render_category_tree(cats)
+        self.assertIn('\u251c', result)  # ├
+        self.assertIn('\u2514', result)  # └
+        self.assertIn('\u2500', result)  # ─
+
+    def test_create_only_no_existing(self):
+        actions = {'new-cat': {'action': 'create', 'name': 'New Category'}}
+        result = render_category_tree([], actions)
+        self.assertIn('New Category', result)
+        self.assertIn('\u2605 new', result)
+
+    def test_create_parent_not_found(self):
+        cats = [_cat(1, 'Tech', 'tech', 50)]
+        actions = {
+            'sub': {
+                'action': 'create',
+                'name': 'Sub',
+                'parent_slug': 'nonexistent',
+            }
+        }
+        result = render_category_tree(cats, actions)
+        self.assertIn('parent not found', result)
+
+
+class TestDetectOrphans(unittest.TestCase):
+    """Tests for orphan detection logic."""
+
+    def test_no_orphans(self):
+        from helpers import _detect_orphans
+        children_map = {'parent': ['child-a', 'child-b']}
+        actions = {
+            'parent': {'action': 'retire'},
+            'child-a': {'action': 'retire'},
+            'child-b': {'action': 'merge', 'target': 'other'},
+        }
+        orphaned, counts = _detect_orphans(children_map, actions)
+        self.assertEqual(len(orphaned), 0)
+        self.assertEqual(len(counts), 0)
+
+    def test_one_orphan(self):
+        from helpers import _detect_orphans
+        children_map = {'parent': ['child-a', 'child-b']}
+        actions = {'parent': {'action': 'retire'}}
+        orphaned, counts = _detect_orphans(children_map, actions)
+        self.assertEqual(orphaned, {'child-a', 'child-b'})
+        self.assertEqual(counts['parent'], 2)
+
+    def test_merge_causes_orphans(self):
+        from helpers import _detect_orphans
+        children_map = {'source': ['kid']}
+        actions = {'source': {'action': 'merge', 'target': 'dest'}}
+        orphaned, counts = _detect_orphans(children_map, actions)
+        self.assertIn('kid', orphaned)
+        self.assertEqual(counts['source'], 1)
 
 
 if __name__ == '__main__':
