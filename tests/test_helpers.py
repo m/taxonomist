@@ -15,7 +15,10 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 from helpers import (
     aggregate_results,
+    batch_manifest_path,
     calculate_batch_size,
+    compute_batch_fingerprint,
+    find_incomplete_batches,
     parse_change_log,
     split_into_batches,
     validate_backup,
@@ -508,6 +511,202 @@ class TestParseChangeLog(unittest.TestCase):
             self.assertEqual(len(changes), 0)
         finally:
             os.unlink(path)
+
+
+class TestComputeBatchFingerprint(unittest.TestCase):
+    """Tests for batch fingerprint computation."""
+
+    def test_same_posts_same_fingerprint(self):
+        posts = [{'post_id': 1}, {'post_id': 2}, {'post_id': 3}]
+        self.assertEqual(
+            compute_batch_fingerprint(posts),
+            compute_batch_fingerprint(posts),
+        )
+
+    def test_different_order_same_fingerprint(self):
+        posts_a = [{'post_id': 3}, {'post_id': 1}, {'post_id': 2}]
+        posts_b = [{'post_id': 1}, {'post_id': 2}, {'post_id': 3}]
+        self.assertEqual(
+            compute_batch_fingerprint(posts_a),
+            compute_batch_fingerprint(posts_b),
+        )
+
+    def test_different_posts_different_fingerprint(self):
+        posts_a = [{'post_id': 1}, {'post_id': 2}]
+        posts_b = [{'post_id': 1}, {'post_id': 3}]
+        self.assertNotEqual(
+            compute_batch_fingerprint(posts_a),
+            compute_batch_fingerprint(posts_b),
+        )
+
+    def test_empty_list_consistent(self):
+        self.assertEqual(
+            compute_batch_fingerprint([]),
+            compute_batch_fingerprint([]),
+        )
+
+    def test_returns_hex_string(self):
+        fp = compute_batch_fingerprint([{'post_id': 1}])
+        self.assertIsInstance(fp, str)
+        self.assertEqual(len(fp), 64)  # SHA-256 hex digest
+
+
+class TestWriteBatchesResume(unittest.TestCase):
+    """Tests for write_batches resume functionality."""
+
+    def _make_posts(self, n):
+        return [{'post_id': i, 'title': f'Post {i}'} for i in range(n)]
+
+    def test_default_writes_manifest(self):
+        posts = self._make_posts(5)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            write_batches(posts, tmpdir, batch_size=2)
+            manifest_file = batch_manifest_path(tmpdir)
+            self.assertTrue(os.path.exists(manifest_file))
+            with open(manifest_file) as f:
+                manifest = json.load(f)
+            self.assertIn('fingerprint', manifest)
+            self.assertEqual(manifest['batch_size'], 2)
+            self.assertEqual(manifest['num_batches'], 3)
+
+    def test_resume_reuses_unchanged_batches(self):
+        posts = self._make_posts(4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # First write.
+            paths1, size1 = write_batches(posts, tmpdir, batch_size=2)
+            # Record modification times.
+            mtimes = {p: os.path.getmtime(p) for p in paths1}
+
+            # Tiny delay to ensure mtime would differ if rewritten.
+            import time
+            time.sleep(0.05)
+
+            # Resume with same posts — should reuse.
+            paths2, size2 = write_batches(posts, tmpdir, batch_size=2, resume=True)
+            self.assertEqual(paths1, paths2)
+            self.assertEqual(size1, size2)
+            # Files should NOT have been rewritten.
+            for p in paths2:
+                self.assertEqual(os.path.getmtime(p), mtimes[p])
+
+    def test_resume_rewrites_when_posts_change(self):
+        posts_v1 = self._make_posts(4)
+        posts_v2 = self._make_posts(6)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            write_batches(posts_v1, tmpdir, batch_size=2)
+            paths, _ = write_batches(posts_v2, tmpdir, batch_size=2, resume=True)
+            # Should have rewritten with 3 batches (6 posts / 2).
+            self.assertEqual(len(paths), 3)
+
+    def test_resume_without_manifest_writes_fresh(self):
+        posts = self._make_posts(4)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths, _ = write_batches(posts, tmpdir, batch_size=2, resume=True)
+            self.assertEqual(len(paths), 2)
+            self.assertTrue(os.path.exists(batch_manifest_path(tmpdir)))
+
+    def test_no_resume_clears_old_batches(self):
+        """Default (resume=False) still clears stale files."""
+        posts = self._make_posts(2)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Write 3 batches first.
+            write_batches(self._make_posts(6), tmpdir, batch_size=2)
+            # Rewrite with fewer posts, no resume.
+            paths, _ = write_batches(posts, tmpdir, batch_size=2)
+            self.assertEqual(len(paths), 1)
+            # Old batch files should be gone (exclude manifest).
+            remaining = [f for f in os.listdir(tmpdir)
+                         if f.startswith('batch-') and f.endswith('.json')
+                         and f != 'batch-manifest.json']
+            self.assertEqual(len(remaining), 1)
+
+
+class TestFindIncompleteBatches(unittest.TestCase):
+    """Tests for finding batches without valid result files."""
+
+    def _write_file(self, directory, name, data):
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, name)
+        with open(path, 'w') as f:
+            json.dump(data, f)
+
+    def test_all_complete(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = os.path.join(tmpdir, 'batches')
+            results_dir = os.path.join(tmpdir, 'results')
+            self._write_file(batch_dir, 'batch-000.json', [{'post_id': 1}])
+            self._write_file(batch_dir, 'batch-001.json', [{'post_id': 2}])
+            self._write_file(results_dir, 'result-000.json', [
+                {'post_id': 1, 'cats': ['tech'], 'new_cats': []},
+            ])
+            self._write_file(results_dir, 'result-001.json', [
+                {'post_id': 2, 'cats': ['music'], 'new_cats': []},
+            ])
+            self.assertEqual(find_incomplete_batches(batch_dir, results_dir), [])
+
+    def test_none_complete(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = os.path.join(tmpdir, 'batches')
+            results_dir = os.path.join(tmpdir, 'results')
+            self._write_file(batch_dir, 'batch-000.json', [{'post_id': 1}])
+            self._write_file(batch_dir, 'batch-001.json', [{'post_id': 2}])
+            os.makedirs(results_dir, exist_ok=True)
+            incomplete = find_incomplete_batches(batch_dir, results_dir)
+            self.assertEqual(incomplete, ['batch-000.json', 'batch-001.json'])
+
+    def test_gap_in_middle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = os.path.join(tmpdir, 'batches')
+            results_dir = os.path.join(tmpdir, 'results')
+            for i in range(3):
+                self._write_file(batch_dir, f'batch-{i:03d}.json', [{'post_id': i}])
+            self._write_file(results_dir, 'result-000.json', [
+                {'post_id': 0, 'cats': ['a'], 'new_cats': []},
+            ])
+            self._write_file(results_dir, 'result-002.json', [
+                {'post_id': 2, 'cats': ['c'], 'new_cats': []},
+            ])
+            incomplete = find_incomplete_batches(batch_dir, results_dir)
+            self.assertEqual(incomplete, ['batch-001.json'])
+
+    def test_invalid_result_treated_as_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = os.path.join(tmpdir, 'batches')
+            results_dir = os.path.join(tmpdir, 'results')
+            self._write_file(batch_dir, 'batch-000.json', [{'post_id': 1}])
+            # Invalid result: missing 'cats' field.
+            self._write_file(results_dir, 'result-000.json', [
+                {'post_id': 1},
+            ])
+            incomplete = find_incomplete_batches(batch_dir, results_dir)
+            self.assertEqual(incomplete, ['batch-000.json'])
+
+    def test_corrupt_json_treated_as_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = os.path.join(tmpdir, 'batches')
+            results_dir = os.path.join(tmpdir, 'results')
+            self._write_file(batch_dir, 'batch-000.json', [{'post_id': 1}])
+            os.makedirs(results_dir, exist_ok=True)
+            with open(os.path.join(results_dir, 'result-000.json'), 'w') as f:
+                f.write('not valid json{{{')
+            incomplete = find_incomplete_batches(batch_dir, results_dir)
+            self.assertEqual(incomplete, ['batch-000.json'])
+
+    def test_no_results_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = os.path.join(tmpdir, 'batches')
+            results_dir = os.path.join(tmpdir, 'results')  # Does not exist.
+            self._write_file(batch_dir, 'batch-000.json', [{'post_id': 1}])
+            incomplete = find_incomplete_batches(batch_dir, results_dir)
+            self.assertEqual(incomplete, ['batch-000.json'])
+
+    def test_empty_directories(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = os.path.join(tmpdir, 'batches')
+            results_dir = os.path.join(tmpdir, 'results')
+            os.makedirs(batch_dir)
+            os.makedirs(results_dir)
+            self.assertEqual(find_incomplete_batches(batch_dir, results_dir), [])
 
 
 if __name__ == '__main__':
