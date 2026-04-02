@@ -117,7 +117,13 @@ class WpcomAdapter:
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 resp_body = resp.read().decode('utf-8')
-                result = json.loads(resp_body)
+                try:
+                    result = json.loads(resp_body)
+                except json.JSONDecodeError:
+                    raise WpcomApiError(
+                        resp.status, 'invalid_json',
+                        f'Expected JSON, got: {resp_body[:200]}',
+                    )
                 if isinstance(result, dict) and 'error' in result:
                     raise WpcomApiError(
                         resp.status, result['error'],
@@ -125,15 +131,23 @@ class WpcomAdapter:
                     )
                 return result
         except urllib.error.HTTPError as e:
-            body_text = e.read().decode('utf-8', errors='replace')
+            try:
+                body_text = e.read().decode('utf-8', errors='replace')
+            except Exception:
+                body_text = str(e)
             try:
                 err = json.loads(body_text)
                 raise WpcomApiError(
                     e.code, err.get('error', 'unknown'),
                     err.get('message', body_text),
-                )
+                ) from e
             except json.JSONDecodeError:
-                raise WpcomApiError(e.code, 'http_error', body_text)
+                raise WpcomApiError(e.code, 'http_error', body_text) from e
+        except urllib.error.URLError as e:
+            raise WpcomApiError(
+                0, 'connection_error',
+                f'Failed to connect to {url}: {e.reason}',
+            ) from e
 
     def _get(self, path, params=None):
         return self._request('GET', path, params=params)
@@ -236,7 +250,7 @@ class WpcomAdapter:
 
             for post in posts:
                 # Normalize categories from {name: {ID: ...}} hash to list.
-                cat_hash = post.get('categories', {})
+                cat_hash = post.get('categories') or {}
                 cat_names = list(cat_hash.keys())
                 cat_slugs = [v.get('slug', '') for v in cat_hash.values()]
 
@@ -277,16 +291,14 @@ class WpcomAdapter:
         Raises:
             WpcomApiError: If any category ID is not found.
         """
-        categories = self._ensure_category_cache()
-        id_to_name = {c['ID']: c['name'] for c in categories}
-
         names = []
         for cid in category_ids:
-            if cid not in id_to_name:
+            cat = self._get_category_by_id(cid)
+            if cat is None:
                 raise WpcomApiError(
                     404, 'not_found', f'Category ID {cid} not found',
                 )
-            names.append(id_to_name[cid])
+            names.append(cat['name'])
 
         self._post(
             f'/sites/{self.site_id}/posts/{post_id}',
@@ -338,8 +350,9 @@ class WpcomAdapter:
             raise WpcomApiError(
                 404, 'not_found', f'Category {term_id} does not exist',
             )
+        slug = urllib.parse.quote(cat['slug'], safe='')
         self._post(
-            f'/sites/{self.site_id}/categories/slug:{cat["slug"]}/delete',
+            f'/sites/{self.site_id}/categories/slug:{slug}/delete',
         )
         self._invalidate_category_cache()
 
@@ -374,15 +387,19 @@ class WpcomAdapter:
                 404, 'not_found', f'Category {term_id} not found',
             )
 
+        # Copy to avoid mutating the caller's dict.
+        payload = dict(fields)
+
         # Always include parent to prevent silent duplicate creation.
-        if 'parent' not in fields:
-            fields['parent'] = current.get('parent', 0)
+        if 'parent' not in payload:
+            payload['parent'] = current.get('parent', 0)
 
         pre_count = self._get_category_count()
 
+        slug = urllib.parse.quote(current['slug'], safe='')
         result = self._post(
-            f'/sites/{self.site_id}/categories/slug:{current["slug"]}',
-            data=fields,
+            f'/sites/{self.site_id}/categories/slug:{slug}',
+            data=payload,
         )
 
         post_count = self._get_category_count()
@@ -441,7 +458,7 @@ class WpcomAdapter:
                 params['page_handle'] = page_handle
             resp = self._get(f'/sites/{self.site_id}/posts', params=params)
             for post in resp.get('posts', []):
-                cat_hash = post.get('categories', {})
+                cat_hash = post.get('categories') or {}
                 post_categories.append({
                     'post_id': post['ID'],
                     'post_title': post.get('title', ''),
@@ -453,12 +470,16 @@ class WpcomAdapter:
             if not page_handle or not resp.get('posts'):
                 break
 
-        # Resolve default category slug.
+        # Resolve default category slug. Only suppress 404 (category
+        # genuinely missing); all other errors should propagate.
         try:
             default_cat = self.get_default_category()
             default_slug = default_cat.get('slug', '')
-        except WpcomApiError:
-            default_slug = ''
+        except WpcomApiError as e:
+            if e.status_code == 404:
+                default_slug = ''
+            else:
+                raise
 
         backup_data = {
             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime()),

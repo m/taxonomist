@@ -5,6 +5,7 @@ Uses unittest.mock to patch urllib.request.urlopen so no real HTTP
 requests are made. Verifies issue #1-4 defenses and API interactions.
 """
 
+import io
 import json
 import os
 import sys
@@ -326,15 +327,33 @@ class TestErrorHandling(unittest.TestCase):
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
     def test_http_error_raised(self, mock_urlopen):
-        error = urllib.error.HTTPError(
-            'url', 500, 'Server Error', {},
-            MagicMock(read=lambda: b'{"error":"server_error","message":"boom"}'),
-        )
+        fp = io.BytesIO(b'{"error":"server_error","message":"boom"}')
+        error = urllib.error.HTTPError('url', 500, 'Server Error', {}, fp)
         mock_urlopen.side_effect = error
         adapter = WpcomAdapter(VALID_CONFIG)
         with self.assertRaises(WpcomApiError) as ctx:
             adapter.list_categories()
         self.assertEqual(ctx.exception.status_code, 500)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_connection_error_raised(self, mock_urlopen):
+        mock_urlopen.side_effect = urllib.error.URLError('Name resolution failed')
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.list_categories()
+        self.assertEqual(ctx.exception.status_code, 0)
+        self.assertIn('connection_error', ctx.exception.error)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_html_response_raises(self, mock_urlopen):
+        """CDN/Cloudflare returning HTML instead of JSON."""
+        mock_urlopen.return_value = _mock_response('<html>Challenge</html>')
+        # Override mock to return raw bytes
+        mock_urlopen.return_value.read.return_value = b'<html>Challenge</html>'
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.list_categories()
+        self.assertIn('invalid_json', ctx.exception.error)
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
     def test_200_with_error_field(self, mock_urlopen):
