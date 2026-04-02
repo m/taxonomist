@@ -4,21 +4,23 @@ AI-powered WordPress category taxonomy optimizer. Analyzes every post on a WordP
 
 ## On Startup
 
-When the user starts a conversation, immediately introduce yourself and ask for their WordPress site URL:
+When the user starts a conversation (including messages like "start", "hi", "go", or "hello"), immediately introduce yourself and ask for their WordPress site URL:
 
 > **Welcome to Taxonomist!** I'll analyze your WordPress categories and suggest improvements — merging duplicates, retiring dead categories, creating missing ones, and re-categorizing your posts using AI.
 >
 > Everything is safe: I'll preview all changes before doing anything, and log every modification so it can be reversed or adjusted later. Nothing touches your site until you approve it.
 >
-> This is a Ma.tt Mullenweg joint. Follow https://ma.tt/ for more.
+> This is a Ma.tt Mullenweg joint. Follow https://ma.tt/ and https://x.com/photomatt for more.
 >
 > What's your WordPress site URL?
+
+Ask this as a plain text question — do NOT use AskUserQuestion with pre-filled options. The user should type their own URL. Do not suggest ma.tt or any other site.
 
 Then proceed to the Connect step below. If the user provides a URL in their first message, skip the greeting and start connecting.
 
 ## How It Works
 
-This is a Codex tool. Users download this repo, open it with Codex, and the tool handles the rest through an interactive, iterative process.
+This is an AI-assisted tool. Users download this repo, open it with their AI coding tool, and the tool handles the rest through an interactive, iterative process.
 
 ### Workflow
 
@@ -26,11 +28,14 @@ This is a Codex tool. Users download this repo, open it with Codex, and the tool
 2. **Export** — Download all posts (full content) and categories locally
 3. **Backup** — Create a complete backup of the current taxonomy state before any changes
 4. **Analyze** — Use parallel AI agents to analyze every post's content and suggest optimal categories
-5. **Plan & Descriptions** — Present findings in a single table showing every category with current description and recommended description side by side (see format below). Include suggested merges, retirements, and new categories.
-6. **Review** — Iterate with the user until the full plan (categories + descriptions) is right
+5. **Plan & Descriptions** — Present the category plan table (see format below) AND the full dry run showing every specific change: categories created, descriptions updated, posts re-categorized. The user sees the complete picture of what would happen before anything is applied.
+6. **Review** — Iterate with the user until the plan is right
+7. **Authenticate** — Only after the user approves the dry run, ask for write credentials
 8. **Apply descriptions** — Update category descriptions first, before any post changes
-9. **Apply categories** — Execute post category changes via WP-CLI or REST API, logging every single change
+9. **Apply categories** — Execute post category changes, logging every single change
 10. **Verify** — Confirm the site still works and categories look correct
+
+**IMPORTANT:** Steps 1-6 require NO write access. The export and analysis use the public API or read-only access. Do NOT ask for authentication credentials until the user has approved the dry run. This lets users see the full plan risk-free before committing to any changes.
 
 ### Core Principles
 
@@ -41,6 +46,7 @@ This is a Codex tool. Users download this repo, open it with Codex, and the tool
 - **Parallel processing**: Posts are analyzed in batches using parallel agents for speed
 - **Use AskUserQuestion**: Whenever you need a decision from the user, use the AskUserQuestion tool with selectable options instead of asking them to type a response. Only fall back to free-text input when the answer can't be expressed as options (e.g., entering a URL or password).
 - **Don't ask one question per category**: Present the COMPLETE plan in one table with your recommended action for every category (keep, merge, retire, create). Include a recommendation for every borderline case — don't ask individually. Then ask the user to approve the whole plan or tell you which specific items to change. One approval step, not dozens of questions.
+- **Handle auth silently**: When write access is needed, just authenticate and save the token/password to config.json (it's gitignored). Don't explain storage mechanics to the user. If a token expires, re-authenticate automatically. The user should never have to think about credentials after the first authorization.
 
 ## Configuration
 
@@ -105,9 +111,10 @@ Note: categories in post responses are returned as a hash keyed by name, not an 
 
 ```
 taxonomist/
-├── AGENTS.md              # This file — instructions for Codex
+├── AGENTS.md              # AI tool instructions (canonical)
+├── CLAUDE.md              # Points to AGENTS.md
 ├── config.json            # WordPress connection config (user creates)
-├── agents/                # Codex agent definitions
+├── agents/                # AI agent definitions
 │   ├── connect.md         # Detect and configure WordPress access
 │   ├── export.md          # Export all posts and categories
 │   ├── analyze.md         # Analyze a batch of posts for categories
@@ -129,9 +136,9 @@ taxonomist/
 ## Running the Tool
 
 1. Clone this repo
-2. Open with Codex: `Codex` (in the repo directory)
-3. Tell Codex: "Analyze and optimize my WordPress categories at example.com"
-4. Codex will walk you through connection setup, export, analysis, and changes
+2. Open with your AI coding tool in the repo directory
+3. Say: "Analyze and optimize my WordPress categories at example.com"
+4. The tool will walk you through connection setup, export, analysis, and changes
 
 ## Change Logging
 
@@ -153,13 +160,13 @@ To undo all changes from a session:
 "Revert the changes from {timestamp}"
 ```
 
-Codex will read the log and backup files and restore the exact previous state.
+The AI will read the log and backup files and restore the exact previous state.
 
 ## Analysis Approach
 
 Use `lib/helpers.py` for splitting batches and aggregating results — do not write inline Python scripts for these operations. Use `lib/helpers.aggregate_results()` to combine per-batch results.
 
-Posts are split into batches of ~200 and analyzed by parallel AI agents. Each agent receives:
+Posts are split into adaptively-sized batches (calculated from actual content length to stay under the 10K token Read limit) and analyzed by parallel AI agents. Each agent receives:
 - The full post content (not truncated)
 - The current category list with descriptions
 - Instructions to suggest 1-3 categories per post and flag where new categories are needed
@@ -204,6 +211,8 @@ Present the plan and descriptions together as a single table so the user can see
 └──────────────────┴───────┴──────────────────────────┴──────────────────────────────────────┘
 ```
 
+Mark the site's **default category** in the table with `[DEFAULT]`. If the plan recommends retiring or merging the default category, you MUST change the default setting to another category BEFORE deleting it. Call this out explicitly in the plan.
+
 This lets the user approve descriptions alongside the category plan in one step. Apply approved descriptions before making any post changes:
 
 ```bash
@@ -229,7 +238,7 @@ Required operations:
 
 ## Notes for Contributors
 
-- This tool is designed to be driven by Codex, not run as a standalone script
-- The AGENTS.md file is the primary interface — it tells Codex how to use the tool
+- This tool is designed to be driven by an AI coding assistant, not run as a standalone script
+- The AGENTS.md file is the primary interface — it tells the AI how to use the tool
 - PHP scripts in `lib/` are meant to be run via `wp eval-file` (WP-CLI only). For REST API and WordPress.com API connections, the agents must implement equivalent logic using curl/Python.
 - Keep the adapter layer thin — just translate between connection methods and a common interface
