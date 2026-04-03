@@ -313,6 +313,135 @@ def validate_backup(backup):
     return errors
 
 
+def validate_result_ids(results_dir, batch_dir):
+    """
+    Verify that every post_id in the analysis results actually exists in the
+    source batches.
+
+    This catches a class of agent bug where the analyze agent outputs array
+    indices (0, 1, 2, …) instead of real WordPress post IDs. It also detects
+    IDs that appear in results but were never part of any batch, and batch
+    posts that are missing from the results entirely.
+
+    Args:
+        results_dir: Directory containing result-NNN.json files.
+        batch_dir: Directory containing the corresponding batch-NNN.json files.
+
+    Returns:
+        A dict with keys:
+            valid (bool): True if all checks pass.
+            errors (list[str]): Human-readable error descriptions.
+            invalid_ids (set[int]): Result post_ids not found in any batch.
+            missing_ids (set[int]): Batch post_ids with no result entry.
+            suspect_index_files (list[str]): Result files whose IDs look like
+                sequential indices rather than real post IDs.
+    """
+    # Collect every post_id present in the source batches.
+    batch_ids = set()
+    for filename in sorted(os.listdir(batch_dir)):
+        if not (filename.startswith('batch-') and filename.endswith('.json')):
+            continue
+        with open(os.path.join(batch_dir, filename)) as f:
+            for post in json.load(f):
+                pid = post.get('post_id')
+                if isinstance(pid, int):
+                    batch_ids.add(pid)
+
+    # Collect every post_id from the result files and track per-file ranges.
+    result_ids = set()
+    per_file = {}  # filename -> list of post_ids
+    for filename in sorted(os.listdir(results_dir)):
+        if not (filename.startswith('result-') and filename.endswith('.json')):
+            continue
+        with open(os.path.join(results_dir, filename)) as f:
+            ids = []
+            for entry in json.load(f):
+                pid = entry.get('post_id')
+                if isinstance(pid, int):
+                    ids.append(pid)
+                    result_ids.add(pid)
+            per_file[filename] = ids
+
+    errors = []
+    invalid_ids = result_ids - batch_ids
+    missing_ids = batch_ids - result_ids
+    suspect_files = []
+
+    if invalid_ids:
+        errors.append(
+            f'{len(invalid_ids)} result post_id(s) not found in any batch: '
+            f'{sorted(invalid_ids)[:20]}{"…" if len(invalid_ids) > 20 else ""}'
+        )
+
+    if missing_ids:
+        errors.append(
+            f'{len(missing_ids)} batch post(s) have no result entry: '
+            f'{sorted(missing_ids)[:20]}{"…" if len(missing_ids) > 20 else ""}'
+        )
+
+    # Heuristic: if a result file's IDs form a near-contiguous run starting
+    # at 0 or 1 and the batch IDs do NOT start near 0, it's almost certainly
+    # an index-vs-ID bug.
+    min_batch_id = min(batch_ids) if batch_ids else 0
+    for filename, ids in per_file.items():
+        if len(ids) < 2:
+            continue
+        sorted_ids = sorted(ids)
+        starts_near_zero = sorted_ids[0] <= 1
+        looks_sequential = all(
+            sorted_ids[i + 1] - sorted_ids[i] <= 2
+            for i in range(min(len(sorted_ids) - 1, 20))
+        )
+        if starts_near_zero and looks_sequential and min_batch_id > 100:
+            suspect_files.append(filename)
+            errors.append(
+                f'{filename}: IDs look like array indices (0–{sorted_ids[-1]}) '
+                f'instead of real post IDs (batch range {min_batch_id}–{max(batch_ids)})'
+            )
+
+    return {
+        'valid': len(errors) == 0,
+        'errors': errors,
+        'invalid_ids': invalid_ids,
+        'missing_ids': missing_ids,
+        'suspect_index_files': suspect_files,
+    }
+
+
+def validate_category_slugs(suggestions, valid_slugs):
+    """
+    Check that every category slug in the suggestions exists in the valid set.
+
+    Args:
+        suggestions: List of suggestion dicts (each with a 'cats' list).
+        valid_slugs: Set of valid category slug strings.
+
+    Returns:
+        A dict with keys:
+            valid (bool): True if all slugs are recognized.
+            unknown_slugs (Counter): slug -> count of occurrences.
+            errors (list[str]): Human-readable error descriptions.
+    """
+    unknown = Counter()
+    for entry in suggestions:
+        for cat in entry.get('cats', []):
+            if cat not in valid_slugs:
+                unknown[cat] += 1
+
+    errors = []
+    if unknown:
+        errors.append(
+            f'{len(unknown)} unknown category slug(s): '
+            + ', '.join(f'{slug} ({n}x)' for slug, n in unknown.most_common(10))
+        )
+
+    return {
+        'valid': len(errors) == 0,
+        'unknown_slugs': unknown,
+        'errors': errors,
+    }
+
+
 def parse_change_log(log_path):
     """
     Parse a TSV change log file into a list of change dicts.
