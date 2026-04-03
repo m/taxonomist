@@ -28,14 +28,15 @@ This is an AI-assisted tool. Users download this repo, open it with their AI cod
 2. **Export** — Download all posts (full content) and categories locally
 3. **Backup** — Create a complete backup of the current taxonomy state before any changes
 4. **Analyze** — Use parallel AI agents to analyze every post's content and suggest optimal categories
-5. **Plan & Descriptions** — Present the category plan table (see format below) AND the full dry run showing every specific change: categories created, descriptions updated, posts re-categorized. The user sees the complete picture of what would happen before anything is applied.
-6. **Review** — Iterate with the user until the plan is right
-7. **Authenticate** — Only after the user approves the dry run, ask for write credentials
-8. **Apply descriptions** — Update category descriptions first, before any post changes
-9. **Apply categories** — Execute post category changes, logging every single change
-10. **Verify** — Confirm the site still works and categories look correct
+5. **Validate** — Run automated checks on analysis results before presenting to the user (see Validation below)
+6. **Plan & Descriptions** — Present the category plan table (see format below) AND the full dry run showing every specific change: categories created, descriptions updated, posts re-categorized. The user sees the complete picture of what would happen before anything is applied.
+7. **Review** — Iterate with the user until the plan is right
+8. **Authenticate** — Only after the user approves the dry run, ask for write credentials
+9. **Apply descriptions** — Update category descriptions first, before any post changes
+10. **Apply categories** — Execute post category changes, logging every single change
+11. **Verify** — Confirm the site still works and categories look correct
 
-**IMPORTANT:** Steps 1-6 require NO write access. The export and analysis use the public API or read-only access. Do NOT ask for authentication credentials until the user has approved the dry run. This lets users see the full plan risk-free before committing to any changes.
+**IMPORTANT:** Steps 1-7 require NO write access. The export and analysis use the public API or read-only access. Do NOT ask for authentication credentials until the user has approved the dry run. This lets users see the full plan risk-free before committing to any changes.
 
 ### Core Principles
 
@@ -162,6 +163,46 @@ To undo all changes from a session:
 
 The AI will read the log and backup files and restore the exact previous state.
 
+## Result Validation
+
+After analysis and before presenting the plan, you MUST validate the results. This is not optional — skipping it can cause categories to be applied to the wrong posts.
+
+Run these checks using `lib/helpers.py`:
+
+### 1. Post ID validation (CRITICAL)
+
+```python
+from helpers import validate_result_ids
+check = validate_result_ids('data/results/', 'data/batches/')
+if not check['valid']:
+    for error in check['errors']:
+        print(error)
+```
+
+This catches a known failure mode where an analyze agent outputs array indices (0, 1, 2, …) instead of real WordPress post IDs. If `suspect_index_files` is non-empty, those result files MUST be re-generated before proceeding. Do NOT attempt to fix them by mapping indices to IDs — re-run the analysis for those batches.
+
+### 2. Category slug validation
+
+```python
+from helpers import validate_category_slugs
+valid_slugs = {cat['slug'] for cat in categories}
+check = validate_category_slugs(all_suggestions, valid_slugs)
+if not check['valid']:
+    for error in check['errors']:
+        print(error)
+```
+
+Any unknown slugs must be resolved (typo, or a new category the user hasn't approved yet) before applying.
+
+### 3. Category distribution review
+
+After aggregating results, review the category frequency counts. Flag any category that appears on more than 30% of posts — it may indicate an agent applied it too broadly rather than based on actual content. Common over-application patterns:
+- A **narrow category** applied to anything vaguely related (e.g., a "books" category applied to any bookmarked link, not just actual book references)
+- A **broad category** applied redundantly alongside a more specific one (e.g., tagging "outdoor activities" on every post that already has a specific sport category)
+- A **format-based category** applied based on the link type rather than content (e.g., tagging "tech" on any post that contains a YouTube or GitHub URL)
+
+Present flagged categories to the user for spot-checking before finalizing the plan.
+
 ## Analysis Approach
 
 Use `lib/helpers.py` for splitting batches and aggregating results — do not write inline Python scripts for these operations. Use `lib/helpers.aggregate_results()` to combine per-batch results.
@@ -235,6 +276,16 @@ Required operations:
 - `update_category(id, fields)` — Update category name/slug/description
 - `delete_category(id)` — Delete a category
 - `export_all()` — Bulk export all posts with content and categories
+
+## Post-Apply Verification
+
+After applying category changes, perform a spot-check to catch any misapplied categories:
+
+1. **Fetch a sample of updated posts** from the live site (at least 10, spread across different categories) and verify their categories match the plan.
+2. **Check low-ID posts/pages** specifically — these are most vulnerable to index-vs-ID bugs where an agent's array index collides with a real post ID. Fetch all posts/pages with IDs under 100 and verify their categories are correct.
+3. **Scan each category's member list** on the live site. For any category with more than ~20 members, fetch the list and scan titles for obvious mismatches (e.g., a "Tech" page showing up under "fly-fishing").
+
+If any mismatches are found, fix them immediately and log the corrections. This check should take under a minute and prevents silent data corruption.
 
 ## Notes for Contributors
 
