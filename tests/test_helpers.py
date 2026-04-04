@@ -22,7 +22,9 @@ from helpers import (
     parse_change_log,
     split_into_batches,
     validate_backup,
+    validate_category_slugs,
     validate_export,
+    validate_result_ids,
     validate_suggestions,
     write_batches,
 )
@@ -707,6 +709,137 @@ class TestFindIncompleteBatches(unittest.TestCase):
             os.makedirs(batch_dir)
             os.makedirs(results_dir)
             self.assertEqual(find_incomplete_batches(batch_dir, results_dir), [])
+class TestValidateResultIds(unittest.TestCase):
+    """Tests for post ID validation between batches and results."""
+
+    def _write_json(self, tmpdir, subdir, name, data):
+        path = os.path.join(tmpdir, subdir)
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, name), 'w') as f:
+            json.dump(data, f)
+
+    def test_valid_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_json(tmpdir, 'batches', 'batch-000.json', [
+                {'post_id': 100, 'title': 'A'},
+                {'post_id': 200, 'title': 'B'},
+            ])
+            self._write_json(tmpdir, 'results', 'result-000.json', [
+                {'post_id': 100, 'cats': ['tech']},
+                {'post_id': 200, 'cats': ['food']},
+            ])
+            check = validate_result_ids(
+                os.path.join(tmpdir, 'results'),
+                os.path.join(tmpdir, 'batches'),
+            )
+            self.assertTrue(check['valid'])
+            self.assertEqual(len(check['errors']), 0)
+            self.assertEqual(len(check['invalid_ids']), 0)
+            self.assertEqual(len(check['missing_ids']), 0)
+
+    def test_detects_invalid_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_json(tmpdir, 'batches', 'batch-000.json', [
+                {'post_id': 100, 'title': 'A'},
+            ])
+            self._write_json(tmpdir, 'results', 'result-000.json', [
+                {'post_id': 100, 'cats': ['tech']},
+                {'post_id': 999, 'cats': ['food']},
+            ])
+            check = validate_result_ids(
+                os.path.join(tmpdir, 'results'),
+                os.path.join(tmpdir, 'batches'),
+            )
+            self.assertFalse(check['valid'])
+            self.assertIn(999, check['invalid_ids'])
+
+    def test_detects_missing_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_json(tmpdir, 'batches', 'batch-000.json', [
+                {'post_id': 100, 'title': 'A'},
+                {'post_id': 200, 'title': 'B'},
+            ])
+            self._write_json(tmpdir, 'results', 'result-000.json', [
+                {'post_id': 100, 'cats': ['tech']},
+            ])
+            check = validate_result_ids(
+                os.path.join(tmpdir, 'results'),
+                os.path.join(tmpdir, 'batches'),
+            )
+            self.assertFalse(check['valid'])
+            self.assertIn(200, check['missing_ids'])
+
+    def test_detects_index_vs_id_bug(self):
+        """Catches when an agent outputs 0,1,2,... instead of real post IDs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_json(tmpdir, 'batches', 'batch-000.json', [
+                {'post_id': 2632, 'title': 'A'},
+                {'post_id': 2631, 'title': 'B'},
+                {'post_id': 2630, 'title': 'C'},
+            ])
+            self._write_json(tmpdir, 'results', 'result-000.json', [
+                {'post_id': 0, 'cats': ['tech']},
+                {'post_id': 1, 'cats': ['food']},
+                {'post_id': 2, 'cats': ['art']},
+            ])
+            check = validate_result_ids(
+                os.path.join(tmpdir, 'results'),
+                os.path.join(tmpdir, 'batches'),
+            )
+            self.assertFalse(check['valid'])
+            self.assertIn('result-000.json', check['suspect_index_files'])
+
+    def test_no_false_positive_on_legitimately_low_ids(self):
+        """Don't flag low IDs when the batch itself has low IDs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_json(tmpdir, 'batches', 'batch-000.json', [
+                {'post_id': 1, 'title': 'A'},
+                {'post_id': 2, 'title': 'B'},
+                {'post_id': 3, 'title': 'C'},
+            ])
+            self._write_json(tmpdir, 'results', 'result-000.json', [
+                {'post_id': 1, 'cats': ['tech']},
+                {'post_id': 2, 'cats': ['food']},
+                {'post_id': 3, 'cats': ['art']},
+            ])
+            check = validate_result_ids(
+                os.path.join(tmpdir, 'results'),
+                os.path.join(tmpdir, 'batches'),
+            )
+            self.assertTrue(check['valid'])
+            self.assertEqual(len(check['suspect_index_files']), 0)
+
+
+class TestValidateCategorySlugs(unittest.TestCase):
+    """Tests for category slug validation in suggestions."""
+
+    def test_all_valid(self):
+        suggestions = [
+            {'post_id': 1, 'cats': ['tech', 'food']},
+            {'post_id': 2, 'cats': ['art']},
+        ]
+        check = validate_category_slugs(suggestions, {'tech', 'food', 'art'})
+        self.assertTrue(check['valid'])
+        self.assertEqual(len(check['unknown_slugs']), 0)
+
+    def test_detects_unknown_slugs(self):
+        suggestions = [
+            {'post_id': 1, 'cats': ['tech', 'bogus']},
+            {'post_id': 2, 'cats': ['bogus', 'also-fake']},
+        ]
+        check = validate_category_slugs(suggestions, {'tech', 'food'})
+        self.assertFalse(check['valid'])
+        self.assertEqual(check['unknown_slugs']['bogus'], 2)
+        self.assertEqual(check['unknown_slugs']['also-fake'], 1)
+
+    def test_empty_suggestions(self):
+        check = validate_category_slugs([], {'tech'})
+        self.assertTrue(check['valid'])
+
+    def test_empty_cats(self):
+        suggestions = [{'post_id': 1, 'cats': []}]
+        check = validate_category_slugs(suggestions, {'tech'})
+        self.assertTrue(check['valid'])
 
 
 if __name__ == '__main__':
