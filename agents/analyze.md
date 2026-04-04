@@ -53,10 +53,12 @@ Confidence levels:
 ## Rules
 
 - Read the FULL content, not just the title
+- **Use the actual `post_id` from each post's JSON, NOT the array index.** If the first post has `"post_id": 2632`, output `2632`, not `0`. Getting this wrong causes categories to be applied to the wrong posts.
 - Do NOT suggest catch-all categories like "Uncategorized" or "Asides"
 - A post about a WordPress plugin is "WordPress", not "Software"
 - A post sharing a link with brief commentary is "Links" (if that category exists)
 - A genuinely brief post with no clear topic → "Personal" or leave cats empty
 - For gallery/photo posts with no text content, just suggest "Gallery"
 - Be accurate — wrong categories are worse than missing ones
+- **Only suggest categories that are directly about the post's topic.** Do not add a secondary category unless the post genuinely covers that second topic. A post about a specific hobby is not a generic "recreation" post. A bookmarked link is not a "book recommendation". A YouTube tutorial is not "tech" just because it's on YouTube.
 - `new_cats` should only contain truly novel categories that would apply to multiple posts, not one-off topics
