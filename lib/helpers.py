@@ -6,6 +6,7 @@ These run on the user's machine (not on WordPress) and handle:
 - Aggregating analysis results from multiple agent batches
 - Validating data formats (export JSON, suggestion JSON, backup JSON, log TSV)
 - Generating summary statistics from analysis results
+- Rendering hierarchy tree diffs for plan review
 """
 
 import csv
@@ -458,3 +459,287 @@ def parse_change_log(log_path):
     """
     with open(log_path, newline='') as f:
         return list(csv.DictReader(f, delimiter='\t'))
+
+
+def _build_tree(categories, actions=None):
+    """
+    Build a tree structure from a flat list of categories.
+
+    Indexes categories by slug and term_id, builds a parent-child map,
+    and injects synthetic nodes for 'create' actions.
+
+    Args:
+        categories: List of category dicts (term_id, name, slug, count, parent).
+        actions: Optional dict mapping slug to action descriptors.
+
+    Returns:
+        Tuple of (roots, children_map, node_map) where:
+        - roots: sorted list of root-level slugs
+        - children_map: {slug: [child_slugs]} sorted by name
+        - node_map: {slug: category dict}
+    """
+    actions = actions or {}
+    node_map = {}
+    id_to_slug = {}
+
+    for cat in categories:
+        slug = cat['slug']
+        node_map[slug] = cat
+        # Coerce to int: WordPress APIs may return string IDs.
+        id_to_slug[int(cat['term_id'])] = slug
+
+    children_map = {}
+    roots = []
+    seen = set()
+
+    for cat in categories:
+        slug = cat['slug']
+        seen.add(slug)
+        parent_id = int(cat.get('parent', 0))
+        if parent_id == 0:
+            roots.append(slug)
+        else:
+            parent_slug = id_to_slug.get(parent_id)
+            if parent_slug:
+                children_map.setdefault(parent_slug, []).append(slug)
+            else:
+                roots.append(slug)
+                node_map[slug] = {**cat, '_warning': 'parent missing'}
+
+    # Inject synthetic nodes for 'create' actions.
+    for slug, action in actions.items():
+        if action.get('action') != 'create':
+            continue
+        if slug in seen:
+            continue
+        node_map[slug] = {
+            'name': action.get('name', slug.replace('-', ' ').title()),
+            'slug': slug,
+            'count': action.get('count', 0),
+            'parent': 0,
+            '_synthetic': True,
+        }
+        parent_slug = action.get('parent_slug')
+        if parent_slug and parent_slug in node_map:
+            children_map.setdefault(parent_slug, []).append(slug)
+        elif parent_slug:
+            roots.append(slug)
+            node_map[slug]['_warning'] = 'parent not found'
+        else:
+            roots.append(slug)
+
+    # Detect circular parent references.
+    for slug in list(node_map):
+        visited = set()
+        current = slug
+        while current and current in node_map:
+            if current in visited:
+                # Break the cycle: move to root.
+                if current not in roots:
+                    roots.append(current)
+                for parent_slug, child_list in children_map.items():
+                    if current in child_list:
+                        child_list.remove(current)
+                        break
+                node_map[current] = {**node_map[current], '_warning': 'circular'}
+                break
+            visited.add(current)
+            parent_id = int(node_map[current].get('parent', 0))
+            current = id_to_slug.get(parent_id) if parent_id else None
+
+    # Sort children by name, roots by name.
+    for slug in children_map:
+        children_map[slug].sort(key=lambda s: node_map[s]['name'].lower())
+    roots.sort(key=lambda s: node_map[s]['name'].lower())
+
+    return roots, children_map, node_map
+
+
+def _detect_orphans(children_map, actions):
+    """
+    Find categories whose parent is being retired or merged.
+
+    A category is orphaned if its parent has action 'retire' or 'merge'
+    but the category itself is being kept (or has no action).
+
+    Args:
+        children_map: {slug: [child_slugs]} from _build_tree.
+        actions: Dict mapping slug to action descriptors.
+
+    Returns:
+        Tuple of (orphaned_slugs, orphan_counts) where:
+        - orphaned_slugs: set of slugs that would become orphaned
+        - orphan_counts: {parent_slug: number of orphaned children}
+    """
+    actions = actions or {}
+    orphaned = set()
+    orphan_counts = {}
+
+    for slug, action in actions.items():
+        if action.get('action') not in ('retire', 'merge'):
+            continue
+        children = children_map.get(slug, [])
+        count = 0
+        for child in children:
+            child_action = actions.get(child, {}).get('action', 'keep')
+            if child_action not in ('retire', 'merge'):
+                orphaned.add(child)
+                count += 1
+        if count > 0:
+            orphan_counts[slug] = count
+
+    return orphaned, orphan_counts
+
+
+def _render_node(node, action_info, is_orphaned):
+    """
+    Render a single category node's display text with annotations.
+
+    Args:
+        node: Category dict with at least 'name' and 'count'.
+        action_info: Action dict or None.
+        is_orphaned: Whether this node would become orphaned.
+
+    Returns:
+        String like 'Akismet (2)  ✕ retire → Plugins'
+    """
+    name = node['name']
+    count = node.get('count', 0)
+    synthetic = node.get('_synthetic', False)
+    warning = node.get('_warning')
+
+    if synthetic:
+        label = name
+        if count:
+            label += f' ({count})'
+    else:
+        label = f'{name} ({count})'
+
+    parts = [label]
+
+    if action_info:
+        action = action_info.get('action', 'keep')
+        if action == 'retire':
+            target = action_info.get('target')
+            if target:
+                parts.append(f'\u2715 retire \u2192 {target}')
+            else:
+                parts.append('\u2715 retire')
+        elif action == 'merge':
+            target = action_info.get('target', '?')
+            parts.append(f'\u2192 merge into {target}')
+        elif action == 'create':
+            parts.append('\u2605 new')
+
+    if warning:
+        parts.append(f'\u26a0 {warning}')
+    elif is_orphaned:
+        parts.append('\u26a0 orphaned')
+
+    if action_info and action_info.get('action') in ('retire', 'merge'):
+        orphan_count = action_info.get('_orphan_count', 0)
+        if orphan_count:
+            s = 'child' if orphan_count == 1 else 'children'
+            parts.append(f'\u26a0 {orphan_count} {s} orphaned')
+
+    return '  '.join(parts)
+
+
+def _format_tree_lines(slug, children_map, node_map, actions, orphaned, prefix, is_last):
+    """
+    Recursively render tree lines with box-drawing connectors.
+
+    Args:
+        slug: Current category slug to render.
+        children_map: {slug: [child_slugs]}.
+        node_map: {slug: category dict}.
+        actions: Dict mapping slug to action descriptors.
+        orphaned: Set of orphaned slugs.
+        prefix: String prefix for indentation.
+        is_last: Whether this is the last sibling.
+
+    Returns:
+        List of output strings.
+    """
+    connector = '\u2514\u2500\u2500 ' if is_last else '\u251c\u2500\u2500 '
+    node = node_map[slug]
+    action_info = (actions or {}).get(slug)
+    line = prefix + connector + _render_node(node, action_info, slug in orphaned)
+    lines = [line]
+
+    child_prefix = prefix + ('    ' if is_last else '\u2502   ')
+    children = children_map.get(slug, [])
+    for i, child_slug in enumerate(children):
+        child_is_last = (i == len(children) - 1)
+        lines.extend(_format_tree_lines(
+            child_slug, children_map, node_map, actions,
+            orphaned, child_prefix, child_is_last,
+        ))
+
+    return lines
+
+
+def render_category_tree(categories, actions=None):
+    """
+    Render an annotated ASCII tree of the category hierarchy.
+
+    Shows parent-child relationships with box-drawing characters and
+    annotates proposed changes (retire, merge, create). Detects and
+    warns about categories that would become orphaned.
+
+    Args:
+        categories: List of category dicts from the export/backup JSON.
+            Each dict has: term_id, name, slug, count, parent.
+        actions: Optional dict mapping category slug to an action descriptor:
+            {
+                "action": "keep" | "retire" | "merge" | "create",
+                "target": "merge-target-slug",
+                "parent_slug": "parent-for-new-category",
+                "name": "Display Name (for create)",
+                "count": 0,
+                "detail": "optional context"
+            }
+
+    Returns:
+        Multi-line string showing the hierarchy with annotations.
+    """
+    if not categories and not (actions and any(
+        a.get('action') == 'create' for a in actions.values()
+    )):
+        return '(no categories)'
+
+    roots, children_map, node_map = _build_tree(categories, actions)
+    orphaned, orphan_counts = _detect_orphans(children_map, actions)
+
+    # Inject orphan counts into action_info for rendering.
+    if actions:
+        actions = {slug: {**info} for slug, info in actions.items()}
+        for slug, count in orphan_counts.items():
+            if slug in actions:
+                actions[slug]['_orphan_count'] = count
+
+    if not roots:
+        return '(no categories)'
+
+    # Single root: render directly. Multiple roots: wrap in virtual root.
+    if len(roots) == 1:
+        root = roots[0]
+        node = node_map[root]
+        action_info = (actions or {}).get(root)
+        header = _render_node(node, action_info, root in orphaned)
+        lines = [header]
+        children = children_map.get(root, [])
+        for i, child in enumerate(children):
+            lines.extend(_format_tree_lines(
+                child, children_map, node_map, actions,
+                orphaned, '', i == len(children) - 1,
+            ))
+    else:
+        lines = ['Categories']
+        for i, root in enumerate(roots):
+            lines.extend(_format_tree_lines(
+                root, children_map, node_map, actions,
+                orphaned, '', i == len(roots) - 1,
+            ))
+
+    return '\n'.join(lines)

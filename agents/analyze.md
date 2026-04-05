@@ -62,3 +62,4 @@ Confidence levels:
 - Be accurate — wrong categories are worse than missing ones
 - **Only suggest categories that are directly about the post's topic.** Do not add a secondary category unless the post genuinely covers that second topic. A post about a specific hobby is not a generic "recreation" post. A bookmarked link is not a "book recommendation". A YouTube tutorial is not "tech" just because it's on YouTube.
 - `new_cats` should only contain truly novel categories that would apply to multiple posts, not one-off topics
+- When suggesting a new category, include a `"parent_slug"` if it logically belongs under an existing category (e.g., a new "Full Site Editing" category belongs under "Themes"). This helps the hierarchy tree view show where new categories fit.

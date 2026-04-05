@@ -228,6 +228,60 @@ Use what you learned from analyzing posts to write descriptions that reflect the
 3. Improve existing descriptions that are empty, vague, or outdated
 4. The description should help readers understand what they'll find, not just restate the category name
 
+### Hierarchy Tree View
+
+Before presenting the flat table, generate a hierarchy tree using `render_category_tree()` from `lib/helpers.py`. This shows parent-child relationships and makes structural consequences visible at a glance — especially when retiring or merging categories that have children.
+
+```python
+from helpers import render_category_tree
+import json
+
+with open('data/export/categories.json') as f:
+    categories = json.load(f)
+
+# Build the actions dict from your analysis:
+actions = {
+    "links": {"action": "retire"},
+    "akismet": {"action": "retire", "target": "plugins"},
+    "full-site-editing": {"action": "create", "name": "Full Site Editing", "parent_slug": "themes"},
+    "wp": {"action": "merge", "target": "wordpress"},
+}
+
+print(render_category_tree(categories, actions))
+```
+
+Example output:
+
+```
+Categories
+├── Links (23)  ✕ retire  ⚠ 2 children orphaned
+│   ├── Blogroll (10)  ⚠ orphaned
+│   └── Resources (5)  ⚠ orphaned
+├── Personal (89)
+├── WordPress (150)
+│   ├── Plugins (45)
+│   │   ├── Akismet (2)  ✕ retire → plugins
+│   │   └── WooCommerce (12)
+│   └── Themes (30)
+│       └── Full Site Editing  ★ new
+└── WP (3)  → merge into wordpress
+```
+
+If the tree shows `⚠ orphaned` warnings, call these out to the user explicitly. Orphaned categories become root-level categories when their parent is retired — this may not be the intended outcome. Suggest re-parenting or including them in the plan.
+
+The actions dict maps category slugs to action descriptors:
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `action` | string | yes | `"keep"`, `"retire"`, `"merge"`, or `"create"` |
+| `target` | string | for merge/retire | Slug of the destination category |
+| `parent_slug` | string | for create | Parent slug (omit for root-level) |
+| `name` | string | for create | Display name of the new category |
+| `count` | int | no | Expected post count (for create actions) |
+| `detail` | string | no | Human-readable context |
+
+Display the tree BEFORE the description table so the user sees the structural view first.
+
 ### Presentation Format
 
 Present the plan and descriptions together as a single table so the user can see everything at once:
