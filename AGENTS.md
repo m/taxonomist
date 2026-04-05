@@ -233,7 +233,7 @@ Use what you learned from analyzing posts to write descriptions that reflect the
 Before presenting the flat table, generate a hierarchy tree using `render_category_tree()` from `lib/helpers.py`. This shows parent-child relationships and makes structural consequences visible at a glance — especially when retiring or merging categories that have children.
 
 ```python
-from lib.helpers import render_category_tree
+from helpers import render_category_tree
 import json
 
 with open('data/export/categories.json') as f:
@@ -241,6 +241,7 @@ with open('data/export/categories.json') as f:
 
 # Build the actions dict from your analysis:
 actions = {
+    "links": {"action": "retire"},
     "akismet": {"action": "retire", "target": "plugins"},
     "full-site-editing": {"action": "create", "name": "Full Site Editing", "parent_slug": "themes"},
     "wp": {"action": "merge", "target": "wordpress"},
@@ -253,13 +254,16 @@ Example output:
 
 ```
 Categories
+├── Links (23)  ✕ retire  ⚠ 2 children orphaned
+│   ├── Blogroll (10)  ⚠ orphaned
+│   └── Resources (5)  ⚠ orphaned
+├── Personal (89)
 ├── WordPress (150)
 │   ├── Plugins (45)
-│   │   ├── WooCommerce (12)
-│   │   └── Akismet (2)  ✕ retire → plugins
+│   │   ├── Akismet (2)  ✕ retire → plugins
+│   │   └── WooCommerce (12)
 │   └── Themes (30)
 │       └── Full Site Editing  ★ new
-├── Personal (89)
 └── WP (3)  → merge into wordpress
 ```
 
