@@ -55,8 +55,18 @@ def wp_urlencode(params):
 
     Returns:
         URL-encoded query string.
+
+    Raises:
+        TypeError: If ``params`` is not a dict. Passing a list, tuple, or
+            scalar would silently produce malformed output (e.g. a
+            top-level list would emit ``[]=value`` with no key), so the
+            boundary is enforced explicitly.
     """
     import urllib.parse
+    if not isinstance(params, dict):
+        raise TypeError(
+            f'wp_urlencode expects a dict, got {type(params).__name__}'
+        )
     flattened = []
 
     def flatten(obj, prefix=''):

@@ -643,6 +643,26 @@ class TestWpUrlencode(unittest.TestCase):
         # them as part of the value, not as query separators.
         self.assertEqual(parse_qs(encoded), {'q': ['a&b=c d']})
 
+    def test_rejects_list_input(self):
+        # Top-level lists would produce malformed `[]=value` pairs with
+        # no key. Fail loudly instead.
+        with self.assertRaisesRegex(TypeError, r'expects a dict, got list'):
+            wp_urlencode(['a', 'b'])
+
+    def test_rejects_tuple_input(self):
+        with self.assertRaisesRegex(TypeError, r'expects a dict, got tuple'):
+            wp_urlencode(('a', 'b'))
+
+    def test_rejects_string_input(self):
+        # A string would be iterated character-by-character by the
+        # flatten() helper and produce nonsense. Reject it.
+        with self.assertRaisesRegex(TypeError, r'expects a dict, got str'):
+            wp_urlencode('key=value')
+
+    def test_rejects_none_input(self):
+        with self.assertRaisesRegex(TypeError, r'expects a dict, got NoneType'):
+            wp_urlencode(None)
+
 
 class TestWpUrlencodeIssue2Regression(unittest.TestCase):
     """Regression tests for issue #2.
