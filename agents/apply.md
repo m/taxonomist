@@ -73,11 +73,44 @@ For individual post updates via REST API:
 ```bash
 # REST API
 curl -X POST -u user:pass {url}/wp-json/wp/v2/posts/{id} -d '{"categories":[1,2,3]}'
-# WordPress.com API (uses category names, not IDs)
+
+# WordPress.com API — prefer categories_by_id on v1.2 (see warning below)
 curl -X POST -H 'Authorization: Bearer TOKEN' \
-  --data-urlencode 'categories=Tech,WordPress' \
+  -H 'Content-Type: application/json' \
+  -d '{"categories_by_id": [1, 2, 3]}' \
   'https://public-api.wordpress.com/rest/v1.2/sites/SITE_ID/posts/POST_ID'
 ```
+
+**WordPress.com post category updates** (verified empirically):
+
+For all post category changes, use **v1.2** with the `categories_by_id`
+parameter. It takes an array of integer term IDs, is a true replace,
+and cannot create junk categories regardless of what's in the live
+taxonomy. This is the only sanctioned shape for Taxonomist's analysis
+output.
+
+Do **not** use the `categories` parameter on this endpoint. It is a
+name-based interface with two silent failure modes: numeric values
+become new categories literally named after the number (so a stale ID
+in a "names" list creates a junk category called "1030"), and real
+names drift when a category is renamed upstream of the call.
+
+**Silent-failure modes of `categories_by_id`** (verified empirically):
+
+- **Empty array wipes the post's categories.** Sending
+  `{"categories_by_id": []}` removes every category and WordPress then
+  reassigns the post to the site's default category (e.g. `Uncategorized`).
+  Never send an empty array unless you explicitly intend to clear.
+  Taxonomist should treat an empty `cats` list from analysis as a bug,
+  not a pass-through.
+- **Unknown IDs are silently dropped, not errored.** If you send
+  `{"categories_by_id": [1030, 999999999]}`, the API returns HTTP 200
+  and applies only the IDs that exist (`[1030]` in this example). There
+  is no warning in the response. This means stale IDs — from a renamed
+  category, a deleted category, or a re-exported taxonomy — will quietly
+  disappear. Always validate every ID against the live category list
+  before POSTing, and diff the response's `terms.category` against what
+  you sent to detect drops.
 
 ### Create Category
 ```bash
