@@ -263,7 +263,7 @@ Categories
 │   │   ├── Akismet (2)  ✕ retire → plugins
 │   │   └── WooCommerce (12)
 │   └── Themes (30)
-│       └── Full Site Editing  ★ new
+│       └── Full Site Editing (0)  ★ new
 └── WP (3)  → merge into wordpress
 ```
 

@@ -605,15 +605,9 @@ def _render_node(node, action_info, is_orphaned):
     """
     name = node['name']
     count = node.get('count', 0)
-    synthetic = node.get('_synthetic', False)
     warning = node.get('_warning')
 
-    if synthetic:
-        label = name
-        if count:
-            label += f' ({count})'
-    else:
-        label = f'{name} ({count})'
+    label = f'{name} ({count})'
 
     parts = [label]
 
