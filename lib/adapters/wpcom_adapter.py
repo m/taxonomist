@@ -188,6 +188,62 @@ class WpcomAdapter:
                 return cat
         return None
 
+    def _has_duplicate_slugs(self, slug):
+        """Check if more than one category shares this slug."""
+        count = sum(
+            1 for c in self._ensure_category_cache() if c['slug'] == slug
+        )
+        return count > 1
+
+    def _update_category_v2(self, term_id, fields):
+        """
+        Update a category using the wp/v2 endpoint (ID-based).
+
+        Falls back to this when the v1.1 slug-based endpoint can't
+        distinguish between categories with duplicate slugs.
+
+        Args:
+            term_id: Integer category ID.
+            fields: Dict of fields to update.
+
+        Returns:
+            Parsed JSON response dict.
+
+        Raises:
+            WpcomApiError: On any API error.
+        """
+        url = (
+            f'https://public-api.wordpress.com/wp/v2'
+            f'/sites/{self.site_id}/categories/{term_id}'
+        )
+        body = json.dumps(fields).encode('utf-8')
+        req = urllib.request.Request(url, data=body, method='POST')
+        req.add_header('Authorization', f'Bearer {self.access_token}')
+        req.add_header('User-Agent', 'taxonomist/1.0')
+        req.add_header('Content-Type', 'application/json')
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            try:
+                body_text = e.read().decode('utf-8', errors='replace')
+            except Exception:
+                body_text = str(e)
+            try:
+                err = json.loads(body_text)
+                raise WpcomApiError(
+                    e.code, err.get('code', 'unknown'),
+                    err.get('message', body_text),
+                ) from e
+            except json.JSONDecodeError:
+                raise WpcomApiError(e.code, 'http_error', body_text) from e
+        except urllib.error.URLError as e:
+            raise WpcomApiError(
+                0, 'connection_error',
+                f'Failed to connect: {e.reason}',
+            ) from e
+
     def _get_category_count(self):
         """Get the current total number of categories on the site."""
         resp = self._get(
@@ -327,12 +383,57 @@ class WpcomAdapter:
         self._invalidate_category_cache()
         return result
 
+    def _delete_category_v2(self, term_id):
+        """
+        Delete a category using the wp/v2 endpoint (ID-based).
+
+        Falls back to this when the v1.1 slug-based endpoint can't
+        distinguish between categories with duplicate slugs.
+
+        Args:
+            term_id: Integer category ID.
+
+        Raises:
+            WpcomApiError: On any API error.
+        """
+        url = (
+            f'https://public-api.wordpress.com/wp/v2'
+            f'/sites/{self.site_id}/categories/{term_id}'
+        )
+        req = urllib.request.Request(url, method='DELETE')
+        req.add_header('Authorization', f'Bearer {self.access_token}')
+        req.add_header('User-Agent', 'taxonomist/1.0')
+        req.add_header('Content-Type', 'application/json')
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode('utf-8'))
+        except urllib.error.HTTPError as e:
+            try:
+                body_text = e.read().decode('utf-8', errors='replace')
+            except Exception:
+                body_text = str(e)
+            try:
+                err = json.loads(body_text)
+                raise WpcomApiError(
+                    e.code, err.get('code', 'unknown'),
+                    err.get('message', body_text),
+                ) from e
+            except json.JSONDecodeError:
+                raise WpcomApiError(e.code, 'http_error', body_text) from e
+        except urllib.error.URLError as e:
+            raise WpcomApiError(
+                0, 'connection_error',
+                f'Failed to connect: {e.reason}',
+            ) from e
+
     def delete_category(self, term_id):
         """
         Delete a category by term ID.
 
         Always resolves the term_id to its slug from live data before
-        deleting. Never guesses slugs. (Prevents issue #1.)
+        deleting. Never guesses slugs. (Prevents issue #1.) When
+        duplicate slugs exist, uses the wp/v2 ID-based endpoint.
 
         Args:
             term_id: Integer category ID.
@@ -350,6 +451,12 @@ class WpcomAdapter:
             raise WpcomApiError(
                 404, 'not_found', f'Category {term_id} does not exist',
             )
+
+        if self._has_duplicate_slugs(cat['slug']):
+            self._delete_category_v2(term_id)
+            self._invalidate_category_cache()
+            return
+
         slug = urllib.parse.quote(cat['slug'], safe='')
         self._post(
             f'/sites/{self.site_id}/categories/slug:{slug}/delete',
@@ -362,10 +469,10 @@ class WpcomAdapter:
         """
         Update a category's fields.
 
-        Always includes the current parent in the payload to prevent
-        the WP.com API from silently creating a duplicate term at
-        root level. Verifies term count before and after to detect
-        duplicates. (Prevents issue #3.)
+        When the category's slug is unique, uses the v1.1 slug-based
+        endpoint with parent pinning and duplicate detection (issue #3).
+        When duplicate slugs exist, falls back to the wp/v2 ID-based
+        endpoint to avoid updating the wrong category.
 
         Args:
             term_id: Integer category ID.
@@ -393,6 +500,15 @@ class WpcomAdapter:
         # Always include parent to prevent silent duplicate creation.
         if 'parent' not in payload:
             payload['parent'] = current.get('parent', 0)
+
+        # Use wp/v2 ID-based endpoint when duplicate slugs exist,
+        # since the v1.1 slug-based endpoint can't distinguish them.
+        # The v2 path skips the pre/post term-count check because
+        # ID-based updates cannot create duplicate categories.
+        if self._has_duplicate_slugs(current['slug']):
+            result = self._update_category_v2(term_id, payload)
+            self._invalidate_category_cache()
+            return result
 
         pre_count = self._get_category_count()
 
