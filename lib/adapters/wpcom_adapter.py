@@ -224,7 +224,14 @@ class WpcomAdapter:
 
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode('utf-8'))
+                resp_body = resp.read().decode('utf-8')
+                try:
+                    return json.loads(resp_body)
+                except json.JSONDecodeError:
+                    raise WpcomApiError(
+                        resp.status, 'invalid_json',
+                        f'Expected JSON, got: {resp_body[:200]}',
+                    )
         except urllib.error.HTTPError as e:
             try:
                 body_text = e.read().decode('utf-8', errors='replace')
@@ -407,7 +414,14 @@ class WpcomAdapter:
 
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode('utf-8'))
+                resp_body = resp.read().decode('utf-8')
+                try:
+                    return json.loads(resp_body)
+                except json.JSONDecodeError:
+                    raise WpcomApiError(
+                        resp.status, 'invalid_json',
+                        f'Expected JSON, got: {resp_body[:200]}',
+                    )
         except urllib.error.HTTPError as e:
             try:
                 body_text = e.read().decode('utf-8', errors='replace')

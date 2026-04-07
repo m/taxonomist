@@ -170,10 +170,10 @@ class TestDeleteCategory(unittest.TestCase):
         mock_urlopen.side_effect = [
             _mock_response({'found': 2, 'categories': cats}),  # cache
             _mock_response({'deleted': True}),  # wp/v2 delete
-            _mock_response({'found': 1, 'categories': [cats[1]]}),  # cache refresh
         ]
         adapter = WpcomAdapter(VALID_CONFIG)
         adapter.delete_category(42)
+        self.assertEqual(mock_urlopen.call_count, 2)
 
         v2_call = mock_urlopen.call_args_list[1]
         req = v2_call[0][0]
@@ -274,10 +274,10 @@ class TestUpdateCategory(unittest.TestCase):
             _mock_response({'found': 1}),  # pre-count
             _mock_response({'ID': 42, 'slug': 'tech'}),  # v1.1 update
             _mock_response({'found': 1}),  # post-count
-            _mock_response({'found': 1, 'categories': [cat]}),  # cache refresh
         ]
         adapter = WpcomAdapter(VALID_CONFIG)
         adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(mock_urlopen.call_count, 4)
 
         update_call = mock_urlopen.call_args_list[2]
         req = update_call[0][0]
