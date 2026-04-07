@@ -284,6 +284,45 @@ class TestUpdateCategory(unittest.TestCase):
         self.assertIn('/v1.1/', req.full_url)
         self.assertIn('slug:tech', req.full_url)
 
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_v2_http_error(self, mock_urlopen):
+        """wp/v2 path raises WpcomApiError on HTTP errors."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        error_body = json.dumps({'code': 'term_not_found', 'message': 'Not found'}).encode()
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            urllib.error.HTTPError(None, 404, 'Not Found', {}, io.BytesIO(error_body)),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(ctx.exception.error, 'term_not_found')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_v2_invalid_json_response(self, mock_urlopen):
+        """wp/v2 path raises WpcomApiError on non-JSON success response."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        html_resp = MagicMock()
+        html_resp.status = 200
+        html_resp.read.return_value = b'<html>Maintenance</html>'
+        html_resp.__enter__ = lambda s: s
+        html_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            html_resp,
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(ctx.exception.error, 'invalid_json')
+
     def test_has_duplicate_slugs(self):
         """Detects when multiple categories share a slug."""
         adapter = WpcomAdapter(VALID_CONFIG)

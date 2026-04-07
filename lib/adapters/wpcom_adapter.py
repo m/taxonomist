@@ -195,16 +195,18 @@ class WpcomAdapter:
         )
         return count > 1
 
-    def _update_category_v2(self, term_id, fields):
+    def _request_v2(self, method, path, data=None):
         """
-        Update a category using the wp/v2 endpoint (ID-based).
+        Make a request to the wp/v2 endpoint.
 
-        Falls back to this when the v1.1 slug-based endpoint can't
-        distinguish between categories with duplicate slugs.
+        Used for ID-based category operations when the v1.1 slug-based
+        endpoint can't distinguish between categories with duplicate
+        slugs.
 
         Args:
-            term_id: Integer category ID.
-            fields: Dict of fields to update.
+            method: HTTP method (POST, DELETE).
+            path: Path relative to /wp/v2/sites/{site_id}/.
+            data: Dict to send as JSON body (optional).
 
         Returns:
             Parsed JSON response dict.
@@ -214,10 +216,10 @@ class WpcomAdapter:
         """
         url = (
             f'https://public-api.wordpress.com/wp/v2'
-            f'/sites/{self.site_id}/categories/{term_id}'
+            f'/sites/{self.site_id}/{path}'
         )
-        body = json.dumps(fields).encode('utf-8')
-        req = urllib.request.Request(url, data=body, method='POST')
+        body = json.dumps(data).encode('utf-8') if data is not None else None
+        req = urllib.request.Request(url, data=body, method=method)
         req.add_header('Authorization', f'Bearer {self.access_token}')
         req.add_header('User-Agent', 'taxonomist/1.0')
         req.add_header('Content-Type', 'application/json')
@@ -250,6 +252,10 @@ class WpcomAdapter:
                 0, 'connection_error',
                 f'Failed to connect to {url}: {e.reason}',
             ) from e
+
+    def _update_category_v2(self, term_id, fields):
+        """Update a category using the wp/v2 endpoint (ID-based)."""
+        return self._request_v2('POST', f'categories/{term_id}', data=fields)
 
     def _get_category_count(self):
         """Get the current total number of categories on the site."""
@@ -391,55 +397,8 @@ class WpcomAdapter:
         return result
 
     def _delete_category_v2(self, term_id):
-        """
-        Delete a category using the wp/v2 endpoint (ID-based).
-
-        Falls back to this when the v1.1 slug-based endpoint can't
-        distinguish between categories with duplicate slugs.
-
-        Args:
-            term_id: Integer category ID.
-
-        Raises:
-            WpcomApiError: On any API error.
-        """
-        url = (
-            f'https://public-api.wordpress.com/wp/v2'
-            f'/sites/{self.site_id}/categories/{term_id}'
-        )
-        req = urllib.request.Request(url, method='DELETE')
-        req.add_header('Authorization', f'Bearer {self.access_token}')
-        req.add_header('User-Agent', 'taxonomist/1.0')
-        req.add_header('Content-Type', 'application/json')
-
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                resp_body = resp.read().decode('utf-8')
-                try:
-                    return json.loads(resp_body)
-                except json.JSONDecodeError:
-                    raise WpcomApiError(
-                        resp.status, 'invalid_json',
-                        f'Expected JSON, got: {resp_body[:200]}',
-                    )
-        except urllib.error.HTTPError as e:
-            try:
-                body_text = e.read().decode('utf-8', errors='replace')
-            except Exception:
-                body_text = str(e)
-            try:
-                err = json.loads(body_text)
-                raise WpcomApiError(
-                    e.code, err.get('code', 'unknown'),
-                    err.get('message', body_text),
-                ) from e
-            except json.JSONDecodeError:
-                raise WpcomApiError(e.code, 'http_error', body_text) from e
-        except urllib.error.URLError as e:
-            raise WpcomApiError(
-                0, 'connection_error',
-                f'Failed to connect to {url}: {e.reason}',
-            ) from e
+        """Delete a category using the wp/v2 endpoint (ID-based)."""
+        return self._request_v2('DELETE', f'categories/{term_id}')
 
     def delete_category(self, term_id):
         """
