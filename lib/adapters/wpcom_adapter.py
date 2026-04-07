@@ -398,7 +398,7 @@ class WpcomAdapter:
 
     def _delete_category_v2(self, term_id):
         """Delete a category using the wp/v2 endpoint (ID-based)."""
-        return self._request_v2('DELETE', f'categories/{term_id}')
+        return self._request_v2('DELETE', f'categories/{term_id}?force=true')
 
     def delete_category(self, term_id):
         """

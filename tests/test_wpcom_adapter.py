@@ -179,6 +179,7 @@ class TestDeleteCategory(unittest.TestCase):
         req = v2_call[0][0]
         self.assertIn('/wp/v2/', req.full_url)
         self.assertIn('/categories/42', req.full_url)
+        self.assertIn('force=true', req.full_url)
         self.assertEqual(req.get_method(), 'DELETE')
 
 
