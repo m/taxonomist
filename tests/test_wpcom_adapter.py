@@ -323,6 +323,23 @@ class TestUpdateCategory(unittest.TestCase):
             adapter.update_category(42, {'description': 'new'})
         self.assertEqual(ctx.exception.error, 'invalid_json')
 
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_v2_connection_error(self, mock_urlopen):
+        """wp/v2 path raises WpcomApiError on connection failure."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            urllib.error.URLError('Name resolution failed'),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(ctx.exception.error, 'connection_error')
+        self.assertIn('wp/v2', str(ctx.exception))
+
     def test_has_duplicate_slugs(self):
         """Detects when multiple categories share a slug."""
         adapter = WpcomAdapter(VALID_CONFIG)
