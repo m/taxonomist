@@ -81,13 +81,41 @@ class TestWpcomAdapterInit(unittest.TestCase):
             WpcomAdapter(config)
         self.assertIn('site_id', str(ctx.exception))
 
-    def test_missing_access_token(self):
+    def test_init_without_token(self):
         config = {**VALID_CONFIG, 'connection': {
             'method': 'wpcom-api', 'site_id': '1',
         }}
-        with self.assertRaises(ValueError) as ctx:
-            WpcomAdapter(config)
-        self.assertIn('access_token', str(ctx.exception))
+        adapter = WpcomAdapter(config)
+        self.assertIsNone(adapter.access_token)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_read_without_token(self, mock_urlopen):
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '1',
+        }}
+        adapter = WpcomAdapter(config)
+        mock_urlopen.return_value = _mock_response({'categories': [], 'found': 0})
+        adapter.list_categories()
+        req = mock_urlopen.call_args[0][0]
+        self.assertFalse(req.has_header('Authorization'))
+
+    def test_write_without_token_raises(self):
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '1',
+        }}
+        adapter = WpcomAdapter(config)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.create_category('Test', 'test')
+        self.assertEqual(ctx.exception.error, 'auth_required')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_read_with_token_sends_auth(self, mock_urlopen):
+        adapter = WpcomAdapter(VALID_CONFIG)
+        mock_urlopen.return_value = _mock_response({'categories': [], 'found': 0})
+        adapter.list_categories()
+        req = mock_urlopen.call_args[0][0]
+        self.assertTrue(req.has_header('Authorization'))
+        self.assertIn('test-token-xxx', req.get_header('Authorization'))
 
 
 class TestListCategories(unittest.TestCase):
