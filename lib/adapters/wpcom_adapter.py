@@ -241,7 +241,7 @@ class WpcomAdapter:
         except urllib.error.URLError as e:
             raise WpcomApiError(
                 0, 'connection_error',
-                f'Failed to connect: {e.reason}',
+                f'Failed to connect to {url}: {e.reason}',
             ) from e
 
     def _get_category_count(self):
@@ -424,7 +424,7 @@ class WpcomAdapter:
         except urllib.error.URLError as e:
             raise WpcomApiError(
                 0, 'connection_error',
-                f'Failed to connect: {e.reason}',
+                f'Failed to connect to {url}: {e.reason}',
             ) from e
 
     def delete_category(self, term_id):

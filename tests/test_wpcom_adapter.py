@@ -252,10 +252,10 @@ class TestUpdateCategory(unittest.TestCase):
         mock_urlopen.side_effect = [
             _mock_response({'found': 2, 'categories': cats}),  # cache
             _mock_response({'id': 42, 'slug': 'reviews'}),  # wp/v2 update
-            _mock_response({'found': 2, 'categories': cats}),  # cache refresh
         ]
         adapter = WpcomAdapter(VALID_CONFIG)
         adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(mock_urlopen.call_count, 2)
 
         # The second call should be to wp/v2, not v1.1.
         v2_call = mock_urlopen.call_args_list[1]
