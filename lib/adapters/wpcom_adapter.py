@@ -62,7 +62,8 @@ class WpcomAdapter:
 
         Args:
             config: Dict with 'site_url' and 'connection' containing
-                    'method', 'site_id', and 'access_token'.
+                    'method', 'site_id', and optionally 'access_token'.
+                    The token is only required for write operations.
 
         Raises:
             ValueError: If required config fields are missing.
@@ -75,10 +76,8 @@ class WpcomAdapter:
             )
         if not conn.get('site_id'):
             raise ValueError('Missing required field: connection.site_id')
-        if not conn.get('access_token'):
-            raise ValueError('Missing required field: connection.access_token')
         self.site_id = str(conn['site_id'])
-        self.access_token = conn['access_token']
+        self.access_token = conn.get('access_token')
         self.site_url = config.get('site_url', '')
         self._category_cache = None
 
@@ -86,7 +85,7 @@ class WpcomAdapter:
 
     def _request(self, method, path, data=None, params=None):
         """
-        Make an authenticated request to the WordPress.com API.
+        Make a request to the WordPress.com API.
 
         Args:
             method: HTTP method (GET, POST).
@@ -98,7 +97,8 @@ class WpcomAdapter:
             Parsed JSON response as a dict.
 
         Raises:
-            WpcomApiError: On any API error (including 200 with error field).
+            WpcomApiError: On any API error (including 200 with error
+                field), or if a non-GET request is made without a token.
         """
         url = f'{self.BASE_URL}{path}'
         if params:
@@ -108,8 +108,12 @@ class WpcomAdapter:
         if data is not None:
             body = wp_urlencode(data).encode('utf-8')
 
+        if method != 'GET':
+            self._require_auth()
+
         req = urllib.request.Request(url, data=body, method=method)
-        req.add_header('Authorization', f'Bearer {self.access_token}')
+        if self.access_token:
+            req.add_header('Authorization', f'Bearer {self.access_token}')
         req.add_header('User-Agent', 'taxonomist/1.0')
         if body:
             req.add_header('Content-Type', 'application/x-www-form-urlencoded')
@@ -151,6 +155,15 @@ class WpcomAdapter:
 
     def _get(self, path, params=None):
         return self._request('GET', path, params=params)
+
+    def _require_auth(self):
+        """Raise if no access token is configured."""
+        if not self.access_token:
+            raise WpcomApiError(
+                401, 'auth_required',
+                'This operation requires an access_token in config.json. '
+                'Run the OAuth flow first.',
+            )
 
     def _post(self, path, data=None):
         return self._request('POST', path, data=data)
@@ -470,13 +483,15 @@ class WpcomAdapter:
             if not page_handle or not resp.get('posts'):
                 break
 
-        # Resolve default category slug. Only suppress 404 (category
-        # genuinely missing); all other errors should propagate.
+        # Resolve default category slug. The /sites/{id}/settings endpoint
+        # requires authentication even on public sites, so suppress 401/403
+        # to allow read-only backups without a token. Also suppress 404
+        # (category genuinely missing). Other errors should propagate.
         try:
             default_cat = self.get_default_category()
             default_slug = default_cat.get('slug', '')
         except WpcomApiError as e:
-            if e.status_code == 404:
+            if e.status_code in (401, 403, 404):
                 default_slug = ''
             else:
                 raise
