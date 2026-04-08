@@ -46,7 +46,7 @@ All configuration should happen through the conversation. Ask for credentials in
        "method": "rest-api",
        "api_url": "https://example.com/wp-json",
        "username": "admin",
-       "app_password": "xxxx xxxx xxxx xxxx"
+       "app_password": "xxxx xxxx xxxx xxxx xxxx xxxx"
      }
    }
    ```
@@ -83,30 +83,61 @@ Test: `wp --path={wp_path} option get blogname`
 
 ### REST API + Application Password
 
-For **self-hosted WordPress** sites (WordPress 5.6+). Uses the browser-based authorize-application flow — same frictionless experience as the WordPress.com OAuth flow.
+For **self-hosted WordPress** sites running WordPress 5.6 or newer with [Application Passwords](https://make.wordpress.org/core/2020/11/05/application-passwords-integration-guide/) enabled.
 
-**IMPORTANT:** The authorize URL uses wp-admin, which may be at a different path than the site URL. Detect the correct admin URL first (see step 2 above).
+**IMPORTANT:** The authorize URL lives under wp-admin, which may be at a different path than the site URL. Detect the correct admin URL first (see step 2 of the top-level "Steps" section above).
 
-**Automated flow (preferred):**
+This connection method has two flows. **Pick the right one based on the site's WordPress version**, because WordPress 7.0+ unlocks a frictionless one-click flow that older versions cannot use:
 
-1. Start a local HTTP server on port 19823 to capture the callback
+#### Step 1 — Detect the WordPress version
+
+Try these signals in order, stop at the first one that yields a parseable `MAJOR.MINOR.PATCH` string:
+
+1. **Asset query strings on the homepage HTML.** Run `curl -s {site_url}/ | grep -oE 'ver=[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -u` and pick the most common value. WordPress core stylesheets and scripts are loaded with `?ver={core_version}` by default.
+2. **`/feed/` generator element.** Run `curl -s {site_url}/feed/ | grep -oE '<generator>[^<]+</generator>'`. The text usually looks like `https://wordpress.org/?v=6.9.4`.
+3. **`/readme.html`.** Run `curl -s {site_url}/readme.html | grep -oE 'Version [0-9]+\.[0-9]+(\.[0-9]+)?'`. Often deleted on hardened installs.
+4. **`<meta name="generator">` on the homepage.** Often stripped on production sites, so this is the last resort.
+
+If none of those yields a version (hardened sites strip all of them), treat the site as **older than 7.0** and use the manual flow below. That's the universally-safe fallback.
+
+#### Step 2A — WordPress 7.0 or newer: automated loopback flow
+
+This is the preferred path because the user only has to click "Approve" once — no copying or pasting.
+
+1. Start a local HTTP server bound to **`127.0.0.1:19823`** to capture the callback. The agent should write a small Python or Node one-shot server that handles a single GET, parses `user_login` and `password` from the query string, and exits. `0.0.0.0` is acceptable but `127.0.0.1` is safer (loopback only).
 2. Open the user's browser to the authorize URL:
    ```
-   {admin_url}/authorize-application.php?app_name=Taxonomist&success_url=http://localhost:19823/
+   {admin_url}/authorize-application.php?app_name=Taxonomist&success_url=http://127.0.0.1:19823/
    ```
-3. User logs into wp-admin (if needed) and clicks "Yes, I approve of this connection"
-4. WordPress redirects to `http://localhost:19823/?user_login=USERNAME&password=xxxx+xxxx+xxxx+xxxx`
-5. Local server captures the username and app password from the URL parameters
-6. Save to config.json and test
+   Use `open` (macOS), `xdg-open` (Linux), or `start "" "{url}"` (Windows — the empty `""` is required when the URL is quoted).
+3. The user logs into wp-admin if prompted, then clicks **"Yes, I approve of this connection"**.
+4. WordPress redirects the browser to `http://127.0.0.1:19823/?user_login=USERNAME&password=xxxx%20xxxx%20xxxx%20xxxx%20xxxx%20xxxx`. The local server captures both values. The password arrives URL-encoded — spaces can come through as either `%20` or `+` depending on the WordPress version, so URL-decode before saving (Python's `urllib.parse.parse_qs` handles both).
+5. Save to config.json (see schema below) and verify with the test in Step 3.
 
-The `success_url` MUST include the trailing slash. URL-decode the password (spaces come as `+`).
+**Use the literal string `127.0.0.1`, not `localhost`.** WordPress 7.0+ whitelists only the loopback IP literals `127.0.0.1` and `[::1]` (per RFC 8252 §7.3); the hostname `localhost` is intentionally excluded by RFC 8252 §8.3 to avoid DNS resolution and firewall interception risks. A `success_url` of `http://localhost:19823/` is rejected with the same error as any other non-HTTPS URL.
 
-**Fallback:** If the automated flow fails, ask the user to:
-1. Go to **Users → Profile** in wp-admin
-2. Scroll to "Application Passwords", enter "Taxonomist", click "Add New"
-3. Paste the generated password in the chat
+#### Step 2B — WordPress older than 7.0 (or version unknown): no-redirect manual flow
 
-Save everything to config.json (gitignored):
+WordPress versions before 7.0 reject any `http://` `success_url` (unless `WP_ENVIRONMENT_TYPE=local`), so the loopback flow above will fail with *"The URL must be served over a secure connection."* at the Approve step. Instead, use the no-redirect mode of `authorize-application.php` — when no `success_url` is provided, WordPress renders the generated password inline on the wp-admin success page in a readonly text field.
+
+1. Open the user's browser to the authorize URL — **do not include a `success_url` parameter**:
+   ```
+   {admin_url}/authorize-application.php?app_name=Taxonomist
+   ```
+2. The user logs into wp-admin if prompted, then clicks **"Yes, I approve of this connection"**.
+3. WordPress renders the success page with the generated Application Password displayed in a readonly `<input>` field, chunked as `xxxx xxxx xxxx xxxx xxxx xxxx` (24 characters in 6 groups of 4).
+4. Ask the user to paste back **two things**: their WordPress username and the displayed password. Format the prompt clearly:
+   ```
+   username: their-login-username (NOT the display name or email)
+   password: xxxx xxxx xxxx xxxx xxxx xxxx
+   ```
+   The username confusion is a common source of 401s — be explicit that it must be the login slug, not the friendly name.
+5. Save to config.json (see schema below) and verify with the test in Step 3.
+
+#### Step 3 — Save and verify
+
+The config.json schema is the same regardless of which flow ran:
+
 ```json
 {
   "site_url": "https://example.com",
@@ -114,11 +145,52 @@ Save everything to config.json (gitignored):
     "method": "rest-api",
     "api_url": "https://example.com/wp-json",
     "username": "admin",
-    "app_password": "xxxx xxxx xxxx xxxx"
+    "app_password": "xxxx xxxx xxxx xxxx xxxx xxxx"
   }
 }
 ```
-Test by reading credentials from config: `python3 -c "import json; c=json.load(open('config.json'))['connection']; print(c['username'], c['app_password'])"` then use in curl.
+
+Verify the credentials by hitting `/wp-json/wp/v2/users/me?context=edit` with HTTP Basic auth and confirming the response carries the expected user with `edit_posts` and `manage_categories` capabilities. Read the credentials from disk so they don't end up in shell history:
+
+```bash
+python3 -c "
+import json, base64, urllib.request
+c = json.load(open('config.json'))['connection']
+t = base64.b64encode(f\"{c['username']}:{c['app_password']}\".encode()).decode()
+r = urllib.request.urlopen(urllib.request.Request(
+    f\"{c['api_url']}/wp/v2/users/me?context=edit\",
+    headers={'Authorization': f'Basic {t}'}))
+me = json.load(r)
+print('OK:', me['username'], me['roles'], 'edit_posts:', me['capabilities'].get('edit_posts'))
+"
+```
+
+If the verification 401s, the most likely cause is that the user pasted their display name or email instead of their `user_login` slug — ask them to check the **Username** field (not "Name") at `{admin_url}/profile.php`.
+
+#### Failure modes you should anticipate
+
+- **`authorize-application.php` returns "Application passwords are not available."** — The site has Application Passwords disabled site-wide via the `wp_is_application_passwords_available` filter (some hardened/managed hosts do this). There is no programmatic recovery; the user has to enable it server-side or use a different connection method (WP-CLI over SSH if available, or XML-RPC as a last resort).
+- **`authorize-application.php` returns "Application passwords are not available for your account."** — The user's account doesn't have permission. They need an admin to grant it, or they need to log in as an admin user.
+- **`authorize-application.php` returns "This site is protected by HTTP Basic Auth"** — The whole wp-admin is behind a separate auth layer. The user has to authenticate through the basic-auth dialog first; the agent can't proxy this.
+- In all three cases, the agent should explain the failure to the user and offer to fall back to the manual `Users → Profile` path described below.
+
+#### Manual fallback — generate the App Password by hand
+
+If `authorize-application.php` is unreachable (404, blocked, or any of the failure modes above), ask the user to do it manually:
+
+1. Go to **Users → Profile** in wp-admin (`{admin_url}/profile.php`)
+2. Scroll to "Application Passwords", enter `Taxonomist`, click "Add New Application Password"
+3. Copy the generated password and paste it back here along with the WordPress username
+
+#### Why two flows?
+
+Application Password redirect URLs are validated by WordPress core's `wp_is_authorize_application_redirect_url_valid()` in `wp-admin/includes/user.php`. For the entire history of the function, any `http://` `success_url` was rejected unless `wp_get_environment_type() === 'local'` — which is almost never set on staging/production sites. That meant the "automated callback" pattern simply did not work on real WordPress installs.
+
+That changed in [trunk@30eb659](https://github.com/WordPress/wordpress-develop/commit/30eb659) ([Trac #57809](https://core.trac.wordpress.org/ticket/57809), landed 2026-03-24), which added a loopback whitelist for the literal IPs `127.0.0.1` and `[::1]`. The fix is shipping in **WordPress 7.0**. Once that release is out and propagates, the automated flow becomes available — but only on sites running 7.0 or newer.
+
+Until then (and for years afterward, since WordPress sites take a long time to update), every older site has to use the no-redirect manual flow. Hence the two paths and the version check. The version check is being used as a capability check because WordPress core does not expose a way for an unauthenticated client to probe the loopback whitelist directly — `authorize-application.php` enforces authentication before running the URL validator, so we can't trigger the error without already having the credentials we're trying to obtain.
+
+**Security note for the manual flow.** The no-redirect path requires the user to paste the Application Password into the chat transcript, which means the credential ends up wherever your chat history is stored or synced. The automated flow does not have this exposure because the credential travels directly from the browser to a local socket. If the user is concerned, remind them that Application Passwords can be revoked from **Users → Profile** at any time, and that creating a fresh one for each session is cheap.
 
 ### REST API + JWT
 ```json
