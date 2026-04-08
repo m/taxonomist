@@ -483,13 +483,15 @@ class WpcomAdapter:
             if not page_handle or not resp.get('posts'):
                 break
 
-        # Resolve default category slug. Only suppress 404 (category
-        # genuinely missing); all other errors should propagate.
+        # Resolve default category slug. The /sites/{id}/settings endpoint
+        # requires authentication even on public sites, so suppress 401/403
+        # to allow read-only backups without a token. Also suppress 404
+        # (category genuinely missing). Other errors should propagate.
         try:
             default_cat = self.get_default_category()
             default_slug = default_cat.get('slug', '')
         except WpcomApiError as e:
-            if e.status_code == 404:
+            if e.status_code in (401, 403, 404):
                 default_slug = ''
             else:
                 raise

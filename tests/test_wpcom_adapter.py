@@ -447,6 +447,55 @@ class TestBackup(unittest.TestCase):
         finally:
             os.unlink(output_path)
 
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_backup_without_token_skips_default_category(self, mock_urlopen):
+        """Read-only backup must succeed when /settings returns 403.
+
+        The WordPress.com /sites/{id}/settings endpoint requires auth
+        even on public sites. A token-less backup should still work and
+        record default_category_slug as an empty string rather than
+        propagating the 403.
+        """
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': 'Technology', 'post_count': 5}
+        post = {
+            'ID': 100, 'title': 'Test',
+            'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+        }
+        forbidden = urllib.error.HTTPError(
+            'https://public-api.wordpress.com/rest/v1.1/sites/12345/settings',
+            403, 'Forbidden', {},
+            io.BytesIO(json.dumps({
+                'error': 'unauthorized',
+                'message': 'This endpoint does not allow unauthorized access.',
+            }).encode('utf-8')),
+        )
+        mock_urlopen.side_effect = [
+            # list_categories
+            _mock_response({'found': 1, 'categories': [cat]}),
+            # posts pagination
+            _mock_response({'found': 1, 'posts': [post], 'meta': {}}),
+            # get_default_category -> settings (403, no token)
+            forbidden,
+        ]
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '12345',
+        }}
+        adapter = WpcomAdapter(config)
+        self.assertIsNone(adapter.access_token)
+
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            with open(output_path) as f:
+                backup = json.load(f)
+            self.assertEqual(backup['default_category_slug'], '')
+            self.assertEqual(backup['total_posts'], 1)
+            self.assertEqual(backup['total_categories'], 1)
+        finally:
+            os.unlink(output_path)
+
 
 if __name__ == '__main__':
     unittest.main()
