@@ -17,7 +17,6 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 from adapters.wpcom_adapter import WpcomAdapter, WpcomApiError, wp_urlencode
 
-
 VALID_CONFIG = {
     'site_url': 'https://example.wordpress.com',
     'connection': {

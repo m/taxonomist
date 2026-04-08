@@ -101,7 +101,7 @@ class TestCheckLargestBatch(unittest.TestCase):
         path = os.path.join(self.test_dir, 'batch-000.json')
         with open(path, 'w') as f:
             f.write('x' * 100)
-        
+
         ok, largest, size = check_largest_batch(self.test_dir, max_chars=150)
         self.assertTrue(ok)
         self.assertEqual(largest, 'batch-000.json')
@@ -113,7 +113,7 @@ class TestCheckLargestBatch(unittest.TestCase):
             path = os.path.join(self.test_dir, f'batch-{i:03d}.json')
             with open(path, 'w') as f:
                 f.write('x' * size)
-        
+
         ok, largest, size = check_largest_batch(self.test_dir, max_chars=200)
         self.assertTrue(ok)
         self.assertEqual(largest, 'batch-001.json')
@@ -124,7 +124,7 @@ class TestCheckLargestBatch(unittest.TestCase):
         path = os.path.join(self.test_dir, 'batch-000.json')
         with open(path, 'w') as f:
             f.write('x' * 300)
-        
+
         ok, largest, size = check_largest_batch(self.test_dir, max_chars=200)
         self.assertFalse(ok)
         self.assertEqual(largest, 'batch-000.json')
@@ -137,10 +137,11 @@ class TestMaxBatchTokensEnv(unittest.TestCase):
     def test_env_override(self):
         # We need to reload helpers to pick up the env var change
         # since it's set at the module level.
-        import os
         import importlib
+        import os
+
         import helpers
-        
+
         original_val = os.environ.get('TAXONOMIST_MAX_BATCH_TOKENS')
         try:
             os.environ['TAXONOMIST_MAX_BATCH_TOKENS'] = '5000'
@@ -421,10 +422,22 @@ class TestValidateBackup(unittest.TestCase):
             'total_categories': 10,
             'default_category_slug': 'uncategorized',
             'categories': [
-                {'term_id': 1, 'name': 'Tech', 'slug': 'tech', 'description': '', 'count': 5, 'parent': 0}
+                {
+                    'term_id': 1,
+                    'name': 'Tech',
+                    'slug': 'tech',
+                    'description': '',
+                    'count': 5,
+                    'parent': 0,
+                }
             ],
             'post_categories': [
-                {'post_id': 1, 'post_title': 'Test', 'category_ids': [1], 'category_slugs': ['tech']}
+                {
+                    'post_id': 1,
+                    'post_title': 'Test',
+                    'category_ids': [1],
+                    'category_slugs': ['tech'],
+                }
             ],
         }
         self.assertEqual(validate_backup(backup), [])
@@ -466,9 +479,18 @@ class TestParseChangeLog(unittest.TestCase):
 
     def test_parses_log(self):
         with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False, newline='') as f:
-            f.write("timestamp\taction\tpost_id\tpost_title\told_categories\tnew_categories\tcats_added\tcats_removed\n")
-            f.write("2024-01-01 00:00:00\tSET_CATS\t123\tTest Post\tAsides\tTech|AI\tTech|AI\tAsides\n")
-            f.write("2024-01-01 00:00:01\tSET_CATS\t456\tOther Post\tAsides\tMusic\tMusic\tAsides\n")
+            f.write(
+                "timestamp\taction\tpost_id\tpost_title\told_categories\t"
+                "new_categories\tcats_added\tcats_removed\n"
+            )
+            f.write(
+                "2024-01-01 00:00:00\tSET_CATS\t123\tTest Post\tAsides\t"
+                "Tech|AI\tTech|AI\tAsides\n"
+            )
+            f.write(
+                "2024-01-01 00:00:01\tSET_CATS\t456\tOther Post\tAsides\t"
+                "Music\tMusic\tAsides\n"
+            )
             path = f.name
 
         try:
