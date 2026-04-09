@@ -161,7 +161,8 @@ class TestDeleteCategory(unittest.TestCase):
 
 
 class TestUpdateCategory(unittest.TestCase):
-    """Tests for category updates (issue #3 defenses)."""
+    """Tests for category updates (issue #3 defenses + empty-string
+    clear handling)."""
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
     def test_includes_parent(self, mock_urlopen):
@@ -171,7 +172,9 @@ class TestUpdateCategory(unittest.TestCase):
         mock_urlopen.side_effect = [
             _mock_response({'found': 1, 'categories': [cat]}),  # cache
             _mock_response({'found': 1}),  # pre-count
-            _mock_response({'ID': 42, 'slug': 'sub'}),  # update
+            # Update response must echo the caller's intent so the
+            # verify-after-write check passes.
+            _mock_response({'ID': 42, 'slug': 'sub', 'description': 'new'}),
             _mock_response({'found': 1}),  # post-count
             _mock_response({'found': 1, 'categories': [cat]}),  # cache refresh
         ]
@@ -192,7 +195,7 @@ class TestUpdateCategory(unittest.TestCase):
         mock_urlopen.side_effect = [
             _mock_response({'found': 1, 'categories': [cat]}),
             _mock_response({'found': 1}),
-            _mock_response({'ID': 42}),
+            _mock_response({'ID': 42, 'parent': 7}),
             _mock_response({'found': 1}),
             _mock_response({'found': 1, 'categories': [cat]}),
         ]
@@ -219,6 +222,97 @@ class TestUpdateCategory(unittest.TestCase):
             adapter.update_category(42, {'description': 'new'})
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertIn('duplicate', ctx.exception.error)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_empty_string_substituted_with_null_byte(self, mock_urlopen):
+        """Empty-string clears: caller asks for ``, adapter sends `\\x00`.
+
+        WP.com's v1.1 category update endpoint silently ignores
+        form-urlencoded empty strings. The only shape that actually
+        clears a text field is a single NULL byte; WP sanitization
+        turns it into an empty string server-side.
+        """
+        cat = {'ID': 42, 'name': 'Sub', 'slug': 'sub', 'parent': 0,
+               'description': 'old'}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),  # cache
+            _mock_response({'found': 1}),  # pre-count
+            # Response reflects the cleared state (empty string),
+            # which is what the caller's intent says.
+            _mock_response({'ID': 42, 'description': ''}),
+            _mock_response({'found': 1}),  # post-count
+            _mock_response({'found': 1, 'categories': [cat]}),  # refresh
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.update_category(42, {'description': ''})
+
+        update_call = mock_urlopen.call_args_list[2]
+        body = update_call[0][0].data.decode('utf-8')
+        # The body must carry a NULL byte as the description value,
+        # not a literal empty string. NULL byte urlencodes to `%00`.
+        self.assertIn('description=%00', body)
+        self.assertNotIn('description=&', body)
+        self.assertFalse(body.endswith('description='))
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_preserves_non_empty_strings(self, mock_urlopen):
+        """Non-empty values must NOT be substituted with NULL bytes."""
+        cat = {'ID': 42, 'name': 'Sub', 'slug': 'sub', 'parent': 0}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),
+            _mock_response({'found': 1}),
+            _mock_response({'ID': 42, 'description': 'real value'}),
+            _mock_response({'found': 1}),
+            _mock_response({'found': 1, 'categories': [cat]}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.update_category(42, {'description': 'real value'})
+
+        update_call = mock_urlopen.call_args_list[2]
+        body = update_call[0][0].data.decode('utf-8')
+        self.assertIn('description=real+value', body)
+        self.assertNotIn('%00', body)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_raises_on_silent_no_op(self, mock_urlopen):
+        """Verify-after-write: if the response doesn't match the
+        caller's intent, raise loudly instead of silently reporting
+        success."""
+        cat = {'ID': 42, 'name': 'Sub', 'slug': 'sub', 'parent': 0,
+               'description': 'old value'}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),
+            _mock_response({'found': 1}),
+            # Simulate a silent no-op: POST returns 200 but the
+            # description field still shows the old value.
+            _mock_response({'ID': 42, 'description': 'old value'}),
+            _mock_response({'found': 1}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_category(42, {'description': 'new value'})
+        self.assertEqual(ctx.exception.error, 'update_no_op')
+        self.assertIn('description', str(ctx.exception))
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_verify_accepts_empty_clear_when_response_matches(
+            self, mock_urlopen):
+        """Verify-after-write compares against caller intent (''),
+        not the substituted wire format (`\\x00`)."""
+        cat = {'ID': 42, 'name': 'Sub', 'slug': 'sub', 'parent': 0,
+               'description': 'old'}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),
+            _mock_response({'found': 1}),
+            # WP returns description as empty string after sanitizing
+            # the NULL byte — matches the caller's intent.
+            _mock_response({'ID': 42, 'description': ''}),
+            _mock_response({'found': 1}),
+            _mock_response({'found': 1, 'categories': [cat]}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        # Must not raise.
+        adapter.update_category(42, {'description': ''})
 
 
 class TestSetPostCategories(unittest.TestCase):

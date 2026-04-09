@@ -367,6 +367,14 @@ class WpcomAdapter:
         root level. Verifies term count before and after to detect
         duplicates. (Prevents issue #3.)
 
+        Empty-string values are translated to a single NULL byte
+        before posting because WP.com's v1.1 category endpoint
+        silently ignores form-urlencoded empty strings — see the
+        "empty-string clears" note below. After the update, the
+        response is compared field-by-field against the caller's
+        intent and raises on mismatch so silent no-ops become loud
+        failures.
+
         Args:
             term_id: Integer category ID.
             fields: Dict of fields to update (description, name, etc.).
@@ -375,7 +383,9 @@ class WpcomAdapter:
             API response dict.
 
         Raises:
-            WpcomApiError: If category not found or duplicate detected.
+            WpcomApiError: If category not found, a duplicate is
+                detected, or the API silently fails to apply one of
+                the requested field updates.
         """
         if not isinstance(term_id, int):
             raise TypeError(
@@ -394,6 +404,21 @@ class WpcomAdapter:
         if 'parent' not in payload:
             payload['parent'] = current.get('parent', 0)
 
+        # Empty-string clears: WP.com's v1.1 category update endpoint
+        # treats a form-urlencoded empty string as "do not update this
+        # field" rather than "clear it". Passing `description=''`
+        # silently preserves the old value and the POST still reports
+        # success. Empirically verified against a live site across
+        # every payload shape I could think of (form/JSON, v1.1/v1.2);
+        # the only form-urlencoded shape that actually clears a text
+        # field is a single NULL byte. WP's input sanitization turns
+        # `\x00` into an empty string on the server side, producing
+        # the clear the caller asked for. Only substitute for string
+        # values — integer fields like `parent=0` must be left alone.
+        for key, value in list(payload.items()):
+            if isinstance(value, str) and value == '':
+                payload[key] = '\x00'
+
         pre_count = self._get_category_count()
 
         slug = urllib.parse.quote(current['slug'], safe='')
@@ -410,6 +435,24 @@ class WpcomAdapter:
                 f'during update of term {term_id}. A duplicate may have '
                 f'been created. Manual inspection required.',
             )
+
+        # Verify-after-write. Compare the POST response against the
+        # caller's original intent field-by-field. If any value
+        # doesn't land (either because the NULL-byte substitution
+        # stopped working, or because WP.com introduces a new silent
+        # failure mode), raise instead of returning a success-shaped
+        # dict that the caller will trust.
+        for key, intended in fields.items():
+            actual = result.get(key)
+            if actual is None:
+                actual = ''
+            if str(actual) != str(intended):
+                raise WpcomApiError(
+                    500, 'update_no_op',
+                    f'update_category(term_id={term_id}): field '
+                    f'{key!r} was sent as {intended!r} but the API '
+                    f'returned {actual!r} after the update',
+                )
 
         self._invalidate_category_cache()
         return result
