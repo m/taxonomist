@@ -383,7 +383,14 @@ class TestGetDefaultCategory(unittest.TestCase):
 
 
 class TestBackup(unittest.TestCase):
-    """Tests for full taxonomy backup."""
+    """Tests for full taxonomy backup.
+
+    The posts fetch uses offset pagination because WP.com v1.1 does
+    not return `meta.next_page` for the posts endpoint. The older
+    page_handle-based loop silently stopped after 100 posts on every
+    site — verified empirically on a real 766-post site where the
+    generated backup had `total_posts: 100`.
+    """
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
     def test_writes_backup_json(self, mock_urlopen):
@@ -396,8 +403,10 @@ class TestBackup(unittest.TestCase):
         mock_urlopen.side_effect = [
             # list_categories
             _mock_response({'found': 1, 'categories': [cat]}),
-            # posts pagination
-            _mock_response({'found': 1, 'posts': [post], 'meta': {}}),
+            # posts offset=0 — one post
+            _mock_response({'found': 1, 'posts': [post]}),
+            # posts offset=100 — empty, loop exits
+            _mock_response({'found': 1, 'posts': []}),
             # get_default_category -> settings
             _mock_response({'default_category': 1}),
             # get_default_category -> category cache
@@ -416,6 +425,121 @@ class TestBackup(unittest.TestCase):
             self.assertEqual(backup['default_category_slug'], 'tech')
             self.assertEqual(backup['categories'][0]['term_id'], 1)
             self.assertEqual(backup['post_categories'][0]['post_id'], 100)
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_paginates_through_multiple_pages(self, mock_urlopen):
+        """Regression: every post beyond the first page must be captured.
+
+        The previous page_handle-based loop read `meta.next_page`
+        which WP.com v1.1 does not return, so the backup silently
+        truncated at 100 posts. This test builds a 250-post response
+        and asserts all 250 end up in the backup.
+        """
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': '', 'post_count': 250}
+
+        def _page(start, count):
+            return [
+                {
+                    'ID': start + i,
+                    'title': f'Post {start + i}',
+                    'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+                }
+                for i in range(count)
+            ]
+
+        mock_urlopen.side_effect = [
+            # list_categories
+            _mock_response({'found': 1, 'categories': [cat]}),
+            # posts offset=0 — 100 posts
+            _mock_response({'found': 250, 'posts': _page(1, 100)}),
+            # posts offset=100 — 100 posts
+            _mock_response({'found': 250, 'posts': _page(101, 100)}),
+            # posts offset=200 — 50 posts
+            _mock_response({'found': 250, 'posts': _page(201, 50)}),
+            # posts offset=300 — empty, loop exits
+            _mock_response({'found': 250, 'posts': []}),
+            # get_default_category -> settings
+            _mock_response({'default_category': 1}),
+            # get_default_category -> category cache
+            _mock_response({'found': 1, 'categories': [cat]}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            with open(output_path) as f:
+                backup = json.load(f)
+            self.assertEqual(backup['total_posts'], 250)
+            ids = [p['post_id'] for p in backup['post_categories']]
+            self.assertEqual(ids, list(range(1, 251)))
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_sends_offset_not_page_handle(self, mock_urlopen):
+        """The posts query must use `offset`, not `page_handle`."""
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': '', 'post_count': 0}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),
+            _mock_response({'found': 0, 'posts': []}),
+            _mock_response({'default_category': 1}),
+            _mock_response({'found': 1, 'categories': [cat]}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            # Second call is the first posts page.
+            posts_url = mock_urlopen.call_args_list[1][0][0].full_url
+            self.assertIn('offset=0', posts_url)
+            self.assertNotIn('page_handle', posts_url)
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_dedupes_across_page_boundaries(self, mock_urlopen):
+        """Offset pagination can return the same post twice if the
+        underlying query shifts (e.g., a new post is published between
+        pages). The loop must dedupe and still terminate."""
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': '', 'post_count': 3}
+
+        def _post(pid):
+            return {
+                'ID': pid,
+                'title': f'Post {pid}',
+                'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+            }
+
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),
+            # offset=0 — posts 1, 2, 3
+            _mock_response({'found': 3, 'posts': [_post(1), _post(2), _post(3)]}),
+            # offset=100 — same posts again (simulates shifted query).
+            # No new IDs, loop must exit rather than spin forever.
+            _mock_response({'found': 3, 'posts': [_post(1), _post(2), _post(3)]}),
+            _mock_response({'default_category': 1}),
+            _mock_response({'found': 1, 'categories': [cat]}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            with open(output_path) as f:
+                backup = json.load(f)
+            # Each post appears exactly once.
+            ids = [p['post_id'] for p in backup['post_categories']]
+            self.assertEqual(sorted(ids), [1, 2, 3])
+            self.assertEqual(backup['total_posts'], 3)
         finally:
             os.unlink(output_path)
 
