@@ -36,15 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: astral-sh/ruff-action@v3
         with:
-          python-version: '3.12'
-          cache: pip
-
-       - uses: astral-sh/ruff-action@v3
-         with:
-           src: lib/ tests/
+          src: lib/ tests/
 
   python-tests:
     name: python-tests
