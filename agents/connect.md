@@ -134,6 +134,8 @@ WordPress versions before 7.0 reject any `http://` `success_url` (unless `WP_ENV
    The username confusion is a common source of 401s — be explicit that it must be the login slug, not the friendly name.
 5. Save to config.json (see schema below) and verify with the test in Step 3.
 
+**Security note:** This flow requires the user to paste the Application Password into the chat transcript, which means the credential ends up wherever chat history is stored or synced. The automated flow (Step 2A) avoids this because the credential travels directly from the browser to a local socket. If the user is concerned, remind them that Application Passwords can be revoked from **Users → Profile** at any time, and that creating a fresh one for each session is cheap.
+
 #### Step 3 — Save and verify
 
 The config.json schema is the same regardless of which flow ran:
@@ -181,16 +183,6 @@ If `authorize-application.php` is unreachable (404, blocked, or any of the failu
 1. Go to **Users → Profile** in wp-admin (`{admin_url}/profile.php`)
 2. Scroll to "Application Passwords", enter `Taxonomist`, click "Add New Application Password"
 3. Copy the generated password and paste it back here along with the WordPress username
-
-#### Why two flows?
-
-Application Password redirect URLs are validated by WordPress core's `wp_is_authorize_application_redirect_url_valid()` in `wp-admin/includes/user.php`. For the entire history of the function, any `http://` `success_url` was rejected unless `wp_get_environment_type() === 'local'` — which is almost never set on staging/production sites. That meant the "automated callback" pattern simply did not work on real WordPress installs.
-
-That changed in [trunk@30eb659](https://github.com/WordPress/wordpress-develop/commit/30eb659) ([Trac #57809](https://core.trac.wordpress.org/ticket/57809), landed 2026-03-24), which added a loopback whitelist for the literal IPs `127.0.0.1` and `[::1]`. The fix is shipping in **WordPress 7.0**. Once that release is out and propagates, the automated flow becomes available — but only on sites running 7.0 or newer.
-
-Until then (and for years afterward, since WordPress sites take a long time to update), every older site has to use the no-redirect manual flow. Hence the two paths and the version check. The version check is being used as a capability check because WordPress core does not expose a way for an unauthenticated client to probe the loopback whitelist directly — `authorize-application.php` enforces authentication before running the URL validator, so we can't trigger the error without already having the credentials we're trying to obtain.
-
-**Security note for the manual flow.** The no-redirect path requires the user to paste the Application Password into the chat transcript, which means the credential ends up wherever your chat history is stored or synced. The automated flow does not have this exposure because the credential travels directly from the browser to a local socket. If the user is concerned, remind them that Application Passwords can be revoked from **Users → Profile** at any time, and that creating a fresh one for each session is cheap.
 
 ### REST API + JWT
 ```json
