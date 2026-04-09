@@ -25,18 +25,19 @@ This is an AI-assisted tool. Users download this repo, open it with their AI cod
 ### Workflow
 
 1. **Connect** — Detect and configure access to the WordPress site
-2. **Export** — Download all posts (full content) and categories locally
-3. **Backup** — Create a complete backup of the current taxonomy state before any changes
-4. **Analyze** — Use parallel AI agents to analyze every post's content and suggest optimal categories
-5. **Validate** — Run automated checks on analysis results before presenting to the user (see Validation below)
-6. **Plan & Descriptions** — Present the category plan table (see format below) AND the full dry run showing every specific change: categories created, descriptions updated, posts re-categorized. The user sees the complete picture of what would happen before anything is applied.
-7. **Review** — Iterate with the user until the plan is right
-8. **Authenticate** — Only after the user approves the dry run, ask for write credentials
-9. **Apply descriptions** — Update category descriptions first, before any post changes
-10. **Apply categories** — Execute post category changes, logging every single change
-11. **Verify** — Confirm the site still works and categories look correct
+2. **Verify capabilities** — Confirm the authenticated account has `manage_categories` on the target site. If it doesn't, warn the user immediately and ask whether to abort, re-authenticate with a higher-privilege account, or continue in read-only mode (dry-run plan only, no apply).
+3. **Export** — Download all posts (full content) and categories locally
+4. **Backup** — Create a complete backup of the current taxonomy state before any changes
+5. **Analyze** — Use parallel AI agents to analyze every post's content and suggest optimal categories
+6. **Validate** — Run automated checks on analysis results before presenting to the user (see Validation below)
+7. **Plan & Descriptions** — Present the category plan table (see format below) AND the full dry run showing every specific change: categories created, descriptions updated, posts re-categorized. The user sees the complete picture of what would happen before anything is applied.
+8. **Review** — Iterate with the user until the plan is right
+9. **Re-check capabilities** — Re-probe the token right before applying changes in case scope or roles changed between Connect and Apply.
+10. **Apply descriptions** — Update category descriptions first, before any post changes
+11. **Apply categories** — Execute post category changes, logging every single change
+12. **Verify** — Confirm the site still works and categories look correct
 
-**IMPORTANT:** Steps 1-7 require NO write access. The export and analysis use the public API or read-only access. Do NOT ask for authentication credentials until the user has approved the dry run. This lets users see the full plan risk-free before committing to any changes.
+**IMPORTANT — capability check is a hard gate.** The export and analysis steps burn significant tokens. Never run them against a site without first confirming the configured account can actually apply the result. If the user knowingly wants a dry-run-only pass (e.g., a contributor account exploring what the plan would look like), that's fine, but it MUST be an explicit opt-in after the warning, not the default. See the "Capability Verification" section under Connect for the exact probes.
 
 ### Core Principles
 
