@@ -42,11 +42,9 @@ jobs:
           python-version: '3.12'
           cache: pip
 
-      - name: Install ruff
-        run: pip install ruff
-
-      - name: Run ruff
-        run: ruff check --output-format=github lib/ tests/
+       - uses: astral-sh/ruff-action@v3
+         with:
+           src: lib/ tests/
 
   python-tests:
     name: python-tests
