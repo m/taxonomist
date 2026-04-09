@@ -442,6 +442,12 @@ def validate_category_slugs(suggestions, valid_slugs):
     }
 
 
+def _read_tsv_dicts(log_path):
+    """Read a TSV file as a list of dicts keyed by header row."""
+    with open(log_path, newline='') as f:
+        return list(csv.DictReader(f, delimiter='\t'))
+
+
 def parse_change_log(log_path):
     """
     Parse a TSV change log file into a list of change dicts.
@@ -449,12 +455,23 @@ def parse_change_log(log_path):
     Uses csv.DictReader so quoted tabs and embedded newlines are handled the
     same way they were written by PHP's fputcsv().
 
-    Args:
-        log_path: Path to the TSV log file.
-
-    Returns:
-        List of dicts with keys: timestamp, action, post_id, post_title,
-        old_categories, new_categories, cats_added, cats_removed.
+    Returns dicts with keys: timestamp, action, post_id, post_title,
+    old_categories, new_categories, cats_added, cats_removed.
     """
-    with open(log_path, newline='') as f:
-        return list(csv.DictReader(f, delimiter='\t'))
+    return _read_tsv_dicts(log_path)
+
+
+def parse_terms_log(log_path):
+    """
+    Parse a TSV term-operation log into a list of dicts.
+
+    The terms log records create/delete/update/set-default operations on
+    categories so a later restore can replay the inverse. The wpcom adapter
+    writes one row per term operation; for UPDATE_CAT, one row per changed
+    field. DELETE_CAT rows store the full pre-delete term as JSON in
+    `old_value` so the category can be rehydrated exactly.
+
+    Returns dicts with keys: timestamp, action, term_id, slug, field,
+    old_value, new_value.
+    """
+    return _read_tsv_dicts(log_path)
