@@ -222,28 +222,84 @@ class TestUpdateCategory(unittest.TestCase):
 
 
 class TestSetPostCategories(unittest.TestCase):
-    """Tests for setting post categories."""
+    """Tests for setting post categories.
+
+    The adapter uses v1.2 + `categories_by_id` to avoid the v1.1
+    silent-failure modes documented in PR #10: numeric category
+    names get auto-interpreted as term IDs and silently dropped,
+    and v1.2 + name-based `categories` creates junk categories
+    literally named after the numeric value. The only safe shape
+    is v1.2 + integer IDs.
+    """
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
-    def test_resolves_ids_to_names(self, mock_urlopen):
+    def test_posts_categories_by_id_to_v1_2(self, mock_urlopen):
+        """Verify the request shape: v1.2 URL + JSON body + integer IDs."""
         cats = [
             {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
             {'ID': 2, 'name': 'AI', 'slug': 'ai', 'parent': 0},
         ]
         mock_urlopen.side_effect = [
             _mock_response({'found': 2, 'categories': cats}),
-            _mock_response({'ID': 100}),  # post update
+            # Post update response with matching categories so drift
+            # detection passes.
+            _mock_response({
+                'ID': 100,
+                'terms': {'category': {
+                    'tech': {'ID': 1, 'slug': 'tech'},
+                    'ai': {'ID': 2, 'slug': 'ai'},
+                }},
+            }),
         ]
         adapter = WpcomAdapter(VALID_CONFIG)
         adapter.set_post_categories(100, [1, 2])
 
         post_call = mock_urlopen.call_args_list[1]
-        body = post_call[0][0].data.decode('utf-8')
-        # Should send comma-separated names, not IDs.
-        self.assertIn('categories=Tech', body)
+        req = post_call[0][0]
+        # Target URL must be v1.2, not v1.1.
+        self.assertIn('/rest/v1.2/', req.full_url)
+        # Body must be JSON with categories_by_id as an integer list.
+        body = json.loads(req.data.decode('utf-8'))
+        self.assertEqual(body, {'categories_by_id': [1, 2]})
+        # Content-Type must announce JSON.
+        self.assertEqual(req.get_header('Content-type'), 'application/json')
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
-    def test_unknown_id_raises(self, mock_urlopen):
+    def test_numeric_category_name_is_not_dropped(self, mock_urlopen):
+        """Regression: category named '24' must survive the round trip.
+
+        The v1.1 + form-encoded `categories` shape silently dropped
+        numeric names because WP.com auto-interpreted them as term
+        IDs. The v1.2 + `categories_by_id` shape sends the term ID
+        directly, so the name's textual content is irrelevant.
+        """
+        cats = [
+            {'ID': 23586, 'name': '24', 'slug': '24', 'parent': 0},
+            {'ID': 1030, 'name': 'Action', 'slug': 'action', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),
+            _mock_response({
+                'ID': 100,
+                'terms': {'category': {
+                    '24': {'ID': 23586, 'slug': '24'},
+                    'action': {'ID': 1030, 'slug': 'action'},
+                }},
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        # Must not raise.
+        adapter.set_post_categories(100, [23586, 1030])
+
+        post_call = mock_urlopen.call_args_list[1]
+        body = json.loads(post_call[0][0].data.decode('utf-8'))
+        # Both IDs must be in the payload — 23586 (for the "24" cat)
+        # and 1030 (for "Action"). Neither should be stringified.
+        self.assertEqual(body['categories_by_id'], [23586, 1030])
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_unknown_id_raises_before_posting(self, mock_urlopen):
+        """Pre-flight check: unknown IDs must be caught locally."""
         mock_urlopen.return_value = _mock_response({
             'found': 0, 'categories': [],
         })
@@ -251,6 +307,57 @@ class TestSetPostCategories(unittest.TestCase):
         with self.assertRaises(WpcomApiError) as ctx:
             adapter.set_post_categories(100, [999])
         self.assertEqual(ctx.exception.status_code, 404)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_raises_on_silent_drop_from_api(self, mock_urlopen):
+        """If the API returns fewer categories than we sent, raise.
+
+        `categories_by_id` is documented (PR #10) to silently drop
+        stale or unknown IDs with no error and HTTP 200. The only
+        reliable check is a read-back of the response against what
+        we sent, which must raise if they don't match.
+        """
+        cats = [
+            {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
+            {'ID': 2, 'name': 'AI', 'slug': 'ai', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),
+            # API returned only category 1; category 2 was silently
+            # dropped. The adapter must surface this as an error.
+            _mock_response({
+                'ID': 100,
+                'terms': {'category': {
+                    'tech': {'ID': 1, 'slug': 'tech'},
+                }},
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.set_post_categories(100, [1, 2])
+        self.assertEqual(ctx.exception.error, 'categories_drift')
+        self.assertIn('dropped=[2]', str(ctx.exception))
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_accepts_legacy_categories_response_shape(self, mock_urlopen):
+        """Fallback: some responses key category info under `categories`
+        (name-keyed hash) instead of `terms.category` (slug-keyed)."""
+        cats = [
+            {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': cats}),
+            _mock_response({
+                'ID': 100,
+                'categories': {
+                    'Tech': {'ID': 1, 'slug': 'tech'},
+                },
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        # Must not raise — drift detection should find the match in
+        # the legacy shape.
+        adapter.set_post_categories(100, [1])
 
 
 class TestExportPosts(unittest.TestCase):
