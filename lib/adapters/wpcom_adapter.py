@@ -445,30 +445,44 @@ class WpcomAdapter:
         """
         categories = self.list_categories()
 
-        # Get post-category mappings.
+        # Get post-category mappings. Uses offset pagination because
+        # WP.com v1.1 does not return `meta.next_page` for the posts
+        # endpoint — a page_handle-based loop silently truncates to
+        # the first 100 posts on every site. Offset is less elegant
+        # but is the shape the v1.1 endpoint actually supports.
         post_categories = []
-        page_handle = None
+        seen_ids = set()
+        offset = 0
         while True:
-            params = {
+            resp = self._get(f'/sites/{self.site_id}/posts', params={
                 'number': 100,
+                'offset': offset,
                 'status': 'publish',
                 'fields': 'ID,title,categories',
-            }
-            if page_handle:
-                params['page_handle'] = page_handle
-            resp = self._get(f'/sites/{self.site_id}/posts', params=params)
-            for post in resp.get('posts', []):
+            })
+            batch = resp.get('posts') or []
+            if not batch:
+                break
+            new_in_batch = 0
+            for post in batch:
+                post_id = post['ID']
+                # Offset pagination can return duplicates at page
+                # boundaries if the underlying query shifts between
+                # calls. Dedupe so the backup stays stable.
+                if post_id in seen_ids:
+                    continue
+                seen_ids.add(post_id)
+                new_in_batch += 1
                 cat_hash = post.get('categories') or {}
                 post_categories.append({
-                    'post_id': post['ID'],
+                    'post_id': post_id,
                     'post_title': post.get('title', ''),
                     'category_ids': [v['ID'] for v in cat_hash.values()],
                     'category_slugs': [v.get('slug', '') for v in cat_hash.values()],
                 })
-            meta = resp.get('meta', {})
-            page_handle = meta.get('next_page')
-            if not page_handle or not resp.get('posts'):
+            if new_in_batch == 0:
                 break
+            offset += 100
 
         # Resolve default category slug. Only suppress 404 (category
         # genuinely missing); all other errors should propagate.
