@@ -296,4 +296,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run tests and lint locally.
 - The AGENTS.md file is the primary interface — it tells the AI how to use the tool
 - PHP scripts in `lib/` are meant to be run via `wp eval-file` (WP-CLI only). For REST API and WordPress.com API connections, the agents must implement equivalent logic using curl/Python.
 - Keep the adapter layer thin — just translate between connection methods and a common interface
-- Run `./vendor/bin/phpcs` before committing PHP changes and `python3 -m unittest discover tests` before committing Python changes
