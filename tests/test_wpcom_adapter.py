@@ -334,6 +334,7 @@ class TestErrorHandling(unittest.TestCase):
         with self.assertRaises(WpcomApiError) as ctx:
             adapter.list_categories()
         self.assertEqual(ctx.exception.status_code, 500)
+        error.close()
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
     def test_connection_error_raised(self, mock_urlopen):
