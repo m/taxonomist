@@ -81,27 +81,42 @@ If the dry run had errors, surface them in the question description so the user 
 
 ### Step 4 — Execute the revert
 
-Re-run with `dry_run=False` and the same arguments. Stream progress as you go.
+Re-run with `dry_run=False` and the same arguments. **The adapter raises `PartialRestoreError` if any operation fails**, so wrap the call:
 
 ```python
-result = adapter.restore(
-    backup_path=f'data/backups/backup-{ts}.json',
-    changes_log_path=f'data/logs/changes-{ts}.tsv',
-    terms_log_path=f'data/logs/terms-{ts}.tsv',
-    mode='auto',
-    dry_run=False,
-)
+from wpcom_adapter import PartialRestoreError
+
+try:
+    result = adapter.restore(
+        backup_path=f'data/backups/backup-{ts}.json',
+        changes_log_path=f'data/logs/changes-{ts}.tsv',
+        terms_log_path=f'data/logs/terms-{ts}.tsv',
+        mode='auto',
+        dry_run=False,
+    )
+    # Clean restore — all operations succeeded.
+except PartialRestoreError as e:
+    result = e.result
+    # Some operations failed. result['partial'] is True and
+    # result['errors'] lists what went wrong. Always surface these
+    # to the user — a half-done revert is worse than no revert.
 ```
+
+The result dict always includes `partial: bool`. When `partial` is True the site is in a mixed state and the user needs to decide next steps (retry, force snapshot mode, or inspect manually).
 
 Write `data/logs/restore-{revert-timestamp}.tsv` recording each executed operation, so the revert itself is auditable and (in principle) reversible.
 
 ### Step 5 — Verify
 
-After the revert returns, sample-check the live site to confirm the state matches the backup:
+The adapter verifies each category mutation via read-back (comparing live state to intended state after each write). Any drift between "the API returned 200" and "the category actually has the right value" is surfaced as a `verification` key on the operation dict. Check for these:
 
-1. Re-pull a handful of posts that were touched (look at `result['operations']` for `set_post_categories` entries) and confirm their categories match the backup.
-2. Re-pull each category that was recreated/renamed/described and confirm the field matches.
-3. Confirm the default category setting.
+```python
+for op in result['operations']:
+    if 'verification' in op:
+        print(f"DRIFT: {op['kind']} — {op['verification']}")
+```
+
+Additionally, sample-check a handful of reverted posts from the live site to confirm their categories match the backup (the adapter does not do per-post read-back to avoid doubling API calls for large sites).
 
 If any mismatches are found, report them. The user may want to fall back to a forced snapshot restore: re-run with `mode='snapshot'`.
 

@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 from adapters.wpcom_adapter import (
-    WpcomAdapter, WpcomApiError, wp_urlencode,
+    WpcomAdapter, WpcomApiError, PartialRestoreError, wp_urlencode,
     ACTION_CREATE_CAT, ACTION_DELETE_CAT, ACTION_UPDATE_CAT,
     ACTION_SET_CATS, ACTION_SET_DEFAULT,
     MODE_AUTO, MODE_LOGS, MODE_SNAPSHOT,
@@ -870,6 +870,119 @@ class TestRestoreAutoMode(unittest.TestCase):
         adapter = FakeWpcom(cats=_make_cats())
         with self.assertRaises(ValueError):
             adapter.restore()
+
+
+class TestPartialRestoreError(unittest.TestCase):
+    """Tests for partial failure signaling."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.backup = os.path.join(self.workdir, 'backup.json')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def test_clean_restore_returns_result(self):
+        """A successful restore should return the result dict, not raise."""
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+        adapter.create_category('X', 'x')
+
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=False,
+        )
+        self.assertFalse(result['partial'])
+        self.assertFalse(result['errors'])
+
+    def test_partial_restore_raises(self):
+        """A restore with errors must raise PartialRestoreError."""
+        workdir = tempfile.mkdtemp(prefix='taxo-partial-')
+        try:
+            terms_log = os.path.join(workdir, 'terms.tsv')
+            changes_log = os.path.join(workdir, 'changes.tsv')
+
+            # Write a changes log that references a category name that
+            # doesn't exist on the live site. The revert will fail to
+            # find it, producing an error.
+            adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+            adapter.set_logging(changes_log, terms_log)
+            adapter.create_category('Ephemeral', 'ephemeral')
+            eid = next(c['ID'] for c in adapter.cats.values()
+                       if c['slug'] == 'ephemeral')
+            adapter.set_post_categories(
+                123, [eid], old_category_ids=[2], post_title='Hello',
+            )
+            adapter.set_logging()
+
+            # Now delete the original 'Tech' category so the revert can't
+            # restore post 123 back to ['Tech'] — it's gone.
+            adapter.delete_category(2)
+
+            with self.assertRaises(PartialRestoreError) as ctx:
+                adapter.restore(
+                    changes_log_path=changes_log,
+                    terms_log_path=terms_log,
+                    mode=MODE_LOGS,
+                    dry_run=False,
+                )
+            result = ctx.exception.result
+            self.assertTrue(result['partial'])
+            self.assertTrue(len(result['errors']) > 0)
+        finally:
+            shutil.rmtree(workdir)
+
+    def test_partial_flag_on_result(self):
+        """The result dict always has a 'partial' boolean."""
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.backup(self.backup)
+
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=True,
+        )
+        self.assertIn('partial', result)
+        self.assertIsInstance(result['partial'], bool)
+
+    def test_dry_run_with_errors_does_not_raise(self):
+        """Dry-run should never raise even if there would be errors."""
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.backup(self.backup)
+
+        # Dry-run always succeeds without raising.
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=True,
+        )
+        self.assertFalse(result['partial'])
+
+
+class TestReadBackVerification(unittest.TestCase):
+    """Tests for post-mutation read-back verification."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.changes = os.path.join(self.workdir, 'changes.tsv')
+        self.terms = os.path.join(self.workdir, 'terms.tsv')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def test_verification_passes_on_clean_restore(self):
+        """No verification errors when mutations succeed normally."""
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.set_logging(terms_log_path=self.terms)
+        adapter.create_category('X', 'x-cat', 'desc')
+        adapter.set_logging()
+
+        with open(self.changes, 'w') as f:
+            f.write('')
+
+        result = adapter.restore(
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS, dry_run=False,
+        )
+        # No verification keys should appear on ops.
+        for op in result['operations']:
+            self.assertNotIn('verification', op)
 
 
 if __name__ == '__main__':

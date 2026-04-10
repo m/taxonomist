@@ -50,6 +50,24 @@ class WpcomApiError(Exception):
         super().__init__(f'WP.com API {status_code}: {error} - {message}')
 
 
+class PartialRestoreError(Exception):
+    """Raised when a restore completes but some operations failed.
+
+    Callers who only check for exceptions will see this instead of
+    silently receiving a success-shaped dict from a half-done revert.
+    The full result dict (with operations, errors, and partial=True)
+    is attached for inspection.
+    """
+
+    def __init__(self, result):
+        self.result = result
+        n = len(result.get('errors', []))
+        super().__init__(
+            f'Restore completed with {n} error(s) — site may be in a '
+            'partially reverted state. Inspect result.errors for details.'
+        )
+
+
 # Log row action types. Defined as constants so a typo in either the
 # writer or the reader becomes a NameError instead of a silent no-op.
 ACTION_SET_CATS = 'SET_CATS'
@@ -228,6 +246,34 @@ class WpcomAdapter:
         if not slug:
             return None
         return self._find_category(lambda c: c.get('slug') == slug)
+
+    def _verify_category_state(self, slug, expected_fields):
+        """
+        Read back a category and verify it matches expected state.
+
+        Returns an error string if verification fails, None if OK.
+        Used after mutations in the restore path to catch silent drift.
+        """
+        self._invalidate_category_cache()
+        cat = self._lookup_category_by_slug(slug)
+        if cat is None:
+            return f'verification: category slug "{slug}" not found after write'
+        mismatches = []
+        for field, expected in expected_fields.items():
+            actual = cat.get(field)
+            if str(actual) != str(expected):
+                mismatches.append(f'{field}: expected {expected!r}, got {actual!r}')
+        if mismatches:
+            return f'verification on "{slug}": {"; ".join(mismatches)}'
+        return None
+
+    def _verify_category_absent(self, slug):
+        """Verify a category no longer exists after deletion."""
+        self._invalidate_category_cache()
+        cat = self._lookup_category_by_slug(slug)
+        if cat is not None:
+            return f'verification: category "{slug}" still exists after delete'
+        return None
 
     def _lookup_category_by_name(self, name):
         if not name:
@@ -817,38 +863,46 @@ class WpcomAdapter:
                     'restore mode=logs requires at least one of '
                     'changes_log_path or terms_log_path to exist'
                 )
-            return self.restore_from_logs(change_rows, term_rows, dry_run=dry_run)
-
-        if mode == MODE_AUTO:
+            result = self.restore_from_logs(
+                change_rows, term_rows, dry_run=dry_run,
+            )
+        elif mode == MODE_AUTO and have_both_logs:
             # Require BOTH logs for an inverse replay. A partial replay
             # (e.g., post assignments only) would leave orphaned created/
             # deleted categories behind — worse than a full snapshot undo.
-            if have_both_logs:
-                return self.restore_from_logs(
-                    change_rows, term_rows, dry_run=dry_run,
-                )
-            # Fall through to snapshot. If only one log exists, include
-            # a note so the agent can surface it to the user.
-
-        if not backup_path:
-            raise ValueError(
-                'restore: no logs and no backup_path provided — nothing to do'
-                if mode == MODE_AUTO
-                else 'restore mode=snapshot requires backup_path'
+            result = self.restore_from_logs(
+                change_rows, term_rows, dry_run=dry_run,
             )
-        with open(backup_path, encoding='utf-8') as f:
-            result = self.restore_from_snapshot(json.load(f), dry_run=dry_run)
-        if mode == MODE_AUTO and have_any_log and not have_both_logs:
-            present = 'terms' if term_rows else 'changes'
-            missing = 'changes' if term_rows else 'terms'
-            result['errors'].append({
-                'op': None,
-                'error': (
-                    f'Only the {present} log was found ({missing} log is '
-                    'missing). Fell back to full snapshot restore to avoid '
-                    'a partial revert.'
-                ),
-            })
+        else:
+            # Snapshot fallback.
+            if not backup_path:
+                raise ValueError(
+                    'restore: no logs and no backup_path provided — '
+                    'nothing to do'
+                    if mode == MODE_AUTO
+                    else 'restore mode=snapshot requires backup_path'
+                )
+            with open(backup_path, encoding='utf-8') as f:
+                result = self.restore_from_snapshot(
+                    json.load(f), dry_run=dry_run,
+                )
+            if mode == MODE_AUTO and have_any_log and not have_both_logs:
+                present = 'terms' if term_rows else 'changes'
+                missing = 'changes' if term_rows else 'terms'
+                result['errors'].append({
+                    'op': None,
+                    'error': (
+                        f'Only the {present} log was found ({missing} '
+                        'log is missing). Fell back to full snapshot '
+                        'restore to avoid a partial revert.'
+                    ),
+                })
+
+        # Surface partial failures loudly. A caller who only checks for
+        # exceptions must not believe a half-done revert succeeded.
+        result['partial'] = bool(result['errors'])
+        if result['partial'] and not dry_run:
+            raise PartialRestoreError(result)
         return result
 
     def restore_from_logs(self, change_rows, term_rows, dry_run=False):
@@ -905,6 +959,7 @@ class WpcomAdapter:
             'mode': MODE_LOGS,
             'operations': operations,
             'errors': errors,
+            'partial': bool(errors),
             'dry_run': dry_run,
         }
 
@@ -955,6 +1010,9 @@ class WpcomAdapter:
             if dry_run:
                 return op
             self.delete_category(int(cat['ID']))
+            err = self._verify_category_absent(slug)
+            if err:
+                op['verification'] = err
             return op
 
         if source == SOURCE_TERM and action == ACTION_DELETE_CAT:
@@ -984,6 +1042,12 @@ class WpcomAdapter:
                 snapshot.get('slug', ''),
                 snapshot.get('description', ''),
             )
+            err = self._verify_category_state(
+                snapshot.get('slug', ''),
+                {'name': snapshot.get('name', '')},
+            )
+            if err:
+                op['verification'] = err
             # Restore parent-child relationship. The snapshot stores the
             # backup's term_id as parent, which may not match the live ID
             # (e.g., if the parent was also deleted and recreated). Resolve
@@ -1044,6 +1108,12 @@ class WpcomAdapter:
                     'category not found on live site',
                 )
             self.update_category(int(cat['ID']), {field: old_value})
+            # For slug changes, verify against the restored slug; for
+            # other fields, the slug column in the row is still valid.
+            verify_slug = old_value if field == 'slug' else slug
+            err = self._verify_category_state(verify_slug, {field: old_value})
+            if err:
+                op['verification'] = err
             return op
 
         if source == SOURCE_TERM and action == ACTION_SET_DEFAULT:
@@ -1089,8 +1159,8 @@ class WpcomAdapter:
         operations = []
         errors = []
 
-        def execute(op, fn, *args):
-            """Run an op and append it to operations / errors. Closure."""
+        def execute(op, fn, *args, verify=None):
+            """Run an op, verify the result, append to operations/errors."""
             operations.append(op)
             if dry_run:
                 return
@@ -1098,6 +1168,11 @@ class WpcomAdapter:
                 fn(*args)
             except WpcomApiError as e:
                 errors.append({'op': op, 'error': str(e)})
+                return
+            if verify:
+                err = verify()
+                if err:
+                    errors.append({'op': op, 'error': err})
 
         with self._logging_suspended():
             backup_cats = backup_data.get('categories', [])
@@ -1126,6 +1201,9 @@ class WpcomAdapter:
                          'description': cat.get('description', '')},
                         self.create_category,
                         cat.get('name', ''), slug, cat.get('description', ''),
+                        verify=lambda s=slug: self._verify_category_state(
+                            s, {'slug': s},
+                        ),
                     )
                     cats_mutated = True
                 elif live.get('name') != cat.get('name'):
@@ -1134,6 +1212,9 @@ class WpcomAdapter:
                          'field': 'name', 'restore_to': cat.get('name', '')},
                         self.update_category,
                         int(live['ID']), {'name': cat.get('name', '')},
+                        verify=lambda s=slug, n=cat.get('name', ''): (
+                            self._verify_category_state(s, {'name': n})
+                        ),
                     )
                     cats_mutated = True
 
@@ -1167,6 +1248,9 @@ class WpcomAdapter:
                          'field': 'parent', 'restore_to': desired_parent},
                         self.update_category,
                         int(live['ID']), {'parent': desired_parent},
+                        verify=lambda s=slug, p=desired_parent: (
+                            self._verify_category_state(s, {'parent': p})
+                        ),
                     )
 
             # Step 2b: reconcile descriptions.
@@ -1182,6 +1266,9 @@ class WpcomAdapter:
                          'field': 'description', 'restore_to': desired_desc},
                         self.update_category,
                         int(live['ID']), {'description': desired_desc},
+                        verify=lambda s=slug, d=desired_desc: (
+                            self._verify_category_state(s, {'description': d})
+                        ),
                     )
 
             # Step 3: restore post category assignments. Pre-collect any
@@ -1256,12 +1343,14 @@ class WpcomAdapter:
                     {'kind': 'delete_category', 'slug': slug},
                     self.delete_category,
                     int(live['ID']),
+                    verify=lambda s=slug: self._verify_category_absent(s),
                 )
 
         return {
             'mode': MODE_SNAPSHOT,
             'operations': operations,
             'errors': errors,
+            'partial': bool(errors),
             'dry_run': dry_run,
         }
 
