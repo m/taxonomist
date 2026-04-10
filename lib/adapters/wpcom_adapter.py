@@ -1389,7 +1389,30 @@ class WpcomAdapter:
             # Step 5: delete categories that exist live but not in the
             # backup (created after the snapshot). Skip the default to
             # avoid orphaning posts.
+            #
+            # Warning: the backup only contains published posts, so
+            # drafts/private/pending/future posts are invisible here.
+            # Deleting a category that a non-published post still
+            # references will cause WordPress to silently reassign that
+            # post to the default category.
             backup_slugs = {c.get('slug', '') for c in backup_cats}
+            extra_slugs = [
+                c['slug'] for c in live_cats
+                if c.get('slug') and c['slug'] not in backup_slugs
+            ]
+            if extra_slugs:
+                operations.append({
+                    'kind': 'warning',
+                    'message': (
+                        f'Deleting {len(extra_slugs)} category(ies) not '
+                        'in the backup. The backup only covers published '
+                        'posts — any drafts, private, pending, or future-'
+                        'dated posts that reference these categories will '
+                        'be silently reassigned to the default category '
+                        'by WordPress.'
+                    ),
+                    'categories': extra_slugs,
+                })
             try:
                 current_default = self.get_default_category()
             except WpcomApiError as e:
