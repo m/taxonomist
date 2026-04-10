@@ -709,6 +709,36 @@ class TestFindIncompleteBatches(unittest.TestCase):
             os.makedirs(batch_dir)
             os.makedirs(results_dir)
             self.assertEqual(find_incomplete_batches(batch_dir, results_dir), [])
+
+    def test_partial_coverage_treated_as_incomplete(self):
+        """A result with fewer posts than the batch should be flagged."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = os.path.join(tmpdir, 'batches')
+            results_dir = os.path.join(tmpdir, 'results')
+            self._write_file(batch_dir, 'batch-000.json', [
+                {'post_id': 10}, {'post_id': 20}, {'post_id': 30},
+            ])
+            # Only 1 of 3 posts covered — agent crashed mid-batch.
+            self._write_file(results_dir, 'result-000.json', [
+                {'post_id': 10, 'cats': ['tech'], 'new_cats': []},
+            ])
+            incomplete = find_incomplete_batches(batch_dir, results_dir)
+            self.assertEqual(incomplete, ['batch-000.json'])
+
+    def test_extra_result_ids_still_valid(self):
+        """Results may contain extra IDs (e.g., from a retry) — that's fine."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            batch_dir = os.path.join(tmpdir, 'batches')
+            results_dir = os.path.join(tmpdir, 'results')
+            self._write_file(batch_dir, 'batch-000.json', [
+                {'post_id': 10},
+            ])
+            self._write_file(results_dir, 'result-000.json', [
+                {'post_id': 10, 'cats': ['tech'], 'new_cats': []},
+                {'post_id': 99, 'cats': ['misc'], 'new_cats': []},
+            ])
+            self.assertEqual(find_incomplete_batches(batch_dir, results_dir), [])
+
 class TestValidateResultIds(unittest.TestCase):
     """Tests for post ID validation between batches and results."""
 

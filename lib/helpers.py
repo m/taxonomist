@@ -232,6 +232,16 @@ def find_incomplete_batches(batch_dir, results_dir):
             if validate_suggestions(data):
                 # Validation errors — treat as incomplete.
                 incomplete.append(batch_file)
+                continue
+
+            # Check that every post in the batch has a result entry.
+            batch_path = os.path.join(batch_dir, batch_file)
+            with open(batch_path) as bf:
+                batch_data = json.load(bf)
+            batch_ids = {p['post_id'] for p in batch_data}
+            result_ids = {e['post_id'] for e in data}
+            if not batch_ids.issubset(result_ids):
+                incomplete.append(batch_file)
         except (json.JSONDecodeError, OSError):
             incomplete.append(batch_file)
 
