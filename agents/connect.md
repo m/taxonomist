@@ -15,18 +15,42 @@ All configuration should happen through the conversation. Ask for credentials in
 ## Steps
 
 1. Ask for the site URL if not provided
-2. **Detect the admin URL** — the site URL and wp-admin URL can differ:
-   - Try `{url}/wp-json/` first. If it works, the REST API base is at that URL.
-   - If not, try common alternatives: `{url}/blog/wp-json/`, `{url}/wordpress/wp-json/`
-   - Check the HTML of the site homepage for `<link rel="https://api.w.org/"` which reveals the actual REST API URL
-   - `curl -s {url}/ | grep -o 'https://api.w.org/[^"]*'` extracts it
-   - The REST API URL tells you where wp-admin lives (same base path)
+2. **Discover the REST API and derive all paths** — WordPress core may live at a different path than the site address (e.g., site at `example.com`, WP core at `example.com/wordpress/`). The REST API root tells us both:
+   - **Primary**: Check the HTTP `Link` header from the user's URL for the REST API base:
+     ```
+     curl -sI {url}/ | grep -i 'rel="https://api.w.org/"'
+     ```
+     This always points to the correct REST API base, regardless of directory structure.
+   - **Fallback**: If no `Link` header, try `{url}/wp-json/`.
+   - Once you have the REST API URL (`{api_url}`), fetch its root and extract the `url` and `home` fields:
+     ```
+     curl -s {api_url}/ | python3 -c "import sys,json; d=json.load(sys.stdin); print('url:', d.get('url')); print('home:', d.get('home'))"
+     ```
+     - `url` = WordPress `siteurl` (where WP core files live, e.g., `https://example.com/wordpress`)
+     - `home` = WordPress `home` (the site address visitors see, e.g., `https://example.com`)
+   - **Derive all other paths from these values:**
+     - `admin_url` = `{url}/wp-admin/` (for App Password authorization)
+     - `xmlrpc_url` = `{url}/xmlrpc.php`
+     - `site_url` for config.json = `home` (what visitors see)
+     - WP.com API domain = parsed from `home` (see step 3)
 3. Probe the site — check WordPress.com first:
-   - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` — if this returns site info, it's a WordPress.com site (hosted or Jetpack-connected). **Go straight to the WordPress.com OAuth flow.** Do NOT try password grant, Basic auth, or Application Passwords — they don't work for WordPress.com hosted sites.
-   - If not WordPress.com, check self-hosted methods:
+   - Build the WP.com API domain from the `home` value discovered in step 2. Parse out the domain and path:
+     - If `home` has no path (e.g., `https://example.com`): use `example.com`
+     - If `home` has a path (e.g., `https://example.com/subdir`): use `example.com::subdir` (replace the first `/` after the domain with `::`)
+   - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{wpcom_domain}/` — check the response:
+     - **Returns site info** (has `ID`, `name`, `URL` fields): it's a WordPress.com site (hosted or Jetpack-connected). **Go straight to the WordPress.com OAuth flow.** Do NOT try password grant, Basic auth, or Application Passwords — they don't work for WordPress.com hosted sites.
+     - **Returns `"API calls to this blog have been disabled"`**: Jetpack may be installed but the WordPress.com API is not usable. Check the self-hosted Jetpack connection endpoint to find out why:
+       ```
+       curl -s {api_url}/jetpack/v4/connection
+       ```
+       - If `hasConnectedOwner` is `true`: Jetpack is connected but the JSON API module is not active. Tell the user: *"Jetpack is installed on your site, but the JSON API module is not active so we're falling back to another authentication method."* Fall through to self-hosted methods below.
+       - If `hasConnectedOwner` is `false`: Jetpack is installed but not connected to WordPress.com. Tell the user: *"Jetpack is installed but not connected to WordPress.com, falling back to another authentication method."* Fall through to self-hosted methods below.
+       - If the endpoint returns 404: Jetpack is not installed. Fall through to self-hosted methods below.
+     - **Returns empty `{}` or connection error**: not a WordPress.com/Jetpack site. Fall through to self-hosted methods below.
+   - Self-hosted methods:
      - REST API: `curl -s {api_url}/wp/v2/categories | head -c 200`
      - If user mentions SSH: `ssh {user}@{host} "which wp"`
-     - XML-RPC (last resort): `curl -s {url}/xmlrpc.php`
+     - XML-RPC (last resort): `curl -s {xmlrpc_url}`
 4. Based on what's available, recommend the best method:
    - WordPress.com sites → WordPress.com OAuth (always)
    - Self-hosted with SSH → WP-CLI over SSH
@@ -85,7 +109,7 @@ Test: `wp --path={wp_path} option get blogname`
 
 For **self-hosted WordPress** sites (WordPress 5.6+). Uses the browser-based authorize-application flow — same frictionless experience as the WordPress.com OAuth flow.
 
-**IMPORTANT:** The authorize URL uses wp-admin, which may be at a different path than the site URL. Detect the correct admin URL first (see step 2 above).
+**IMPORTANT:** The authorize URL uses wp-admin, which may be at a different path than the site address. Always use the `admin_url` derived in step 2 (based on the REST API `url` field, not `home`). For example, if the site is at `example.com` but WP core is at `example.com/wordpress/`, wp-admin is at `example.com/wordpress/wp-admin/`.
 
 **Automated flow (preferred):**
 
@@ -144,7 +168,7 @@ Test by reading credentials from config: `python3 -c "import json; c=json.load(o
   }
 }
 ```
-Test: `curl -s -d '<?xml version="1.0"?><methodCall><methodName>wp.getCategories</methodName><params><param><value>1</value></param><param><value>{user}</value></param><param><value>{pass}</value></param></params></methodCall>' {url}/xmlrpc.php`
+Test: `curl -s -d '<?xml version="1.0"?><methodCall><methodName>wp.getCategories</methodName><params><param><value>1</value></param><param><value>{user}</value></param><param><value>{pass}</value></param></params></methodCall>' {xmlrpc_url}`
 
 ### WordPress.com / Jetpack API
 
@@ -155,8 +179,8 @@ Taxonomist is registered as a WordPress.com OAuth2 app. Users do NOT need to reg
 - Client Secret: not required (WordPress.com treats it as optional for native apps)
 
 **Detection:** Check if the site is on WordPress.com (`*.wordpress.com`) or has Jetpack:
-- `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` (returns site info if accessible)
-- `curl -s {url}/wp-json/jetpack/v4/module` (Jetpack present on self-hosted)
+- `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{wpcom_domain}/` (returns site info if accessible; use `domain::path` syntax for subdirectory sites — see step 3)
+- `curl -s {api_url}/jetpack/v4/module` (Jetpack present on self-hosted)
 
 **Getting a token (use the provided auth script):**
 
@@ -182,7 +206,7 @@ Save token to config.json (gitignored):
 }
 ```
 
-**Site ID:** Captured automatically from the probe in step 3 — the `ID` field in the response from `https://public-api.wordpress.com/rest/v1.1/sites/{domain}/`. You can also use the domain string (e.g., `example.wordpress.com`) but the numeric ID is more reliable.
+**Site ID:** Captured automatically from the probe in step 3 — the `ID` field in the response from `https://public-api.wordpress.com/rest/v1.1/sites/{wpcom_domain}/`. You can also use the domain string (e.g., `example.wordpress.com`) but the numeric ID is more reliable.
 
 **Scopes:** The token has global scope and works for any site the user has access to.
 
