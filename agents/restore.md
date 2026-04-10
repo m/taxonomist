@@ -86,6 +86,7 @@ Re-run with `dry_run=False` and the same arguments. **The adapter raises `Partia
 ```python
 from wpcom_adapter import PartialRestoreError
 
+revert_ts = '{revert-timestamp}'  # use current time, not the original apply timestamp
 try:
     result = adapter.restore(
         backup_path=f'data/backups/backup-{ts}.json',
@@ -93,6 +94,7 @@ try:
         terms_log_path=f'data/logs/terms-{ts}.tsv',
         mode='auto',
         dry_run=False,
+        restore_log_path=f'data/logs/restore-{revert_ts}.tsv',
     )
     # Clean restore — all operations succeeded.
 except PartialRestoreError as e:
@@ -104,7 +106,7 @@ except PartialRestoreError as e:
 
 The result dict always includes `partial: bool`. When `partial` is True the site is in a mixed state and the user needs to decide next steps (retry, force snapshot mode, or inspect manually).
 
-Write `data/logs/restore-{revert-timestamp}.tsv` recording each executed operation, so the revert itself is auditable and (in principle) reversible.
+The `restore_log_path` argument is **not optional in spirit** — always pass it. The adapter streams each operation to this TSV as it executes, so even if the process crashes mid-revert, there's a durable on-disk record of what actually ran. Do not write the restore log from agent code — the adapter enforces it.
 
 ### Step 5 — Verify
 

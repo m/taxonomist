@@ -954,6 +954,70 @@ class TestPartialRestoreError(unittest.TestCase):
         self.assertFalse(result['partial'])
 
 
+class TestRestoreLog(unittest.TestCase):
+    """Tests for the streamed restore audit log."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.changes = os.path.join(self.workdir, 'changes.tsv')
+        self.terms = os.path.join(self.workdir, 'terms.tsv')
+        self.backup = os.path.join(self.workdir, 'backup.json')
+        self.restore_log = os.path.join(self.workdir, 'restore.tsv')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def test_restore_log_written_during_log_replay(self):
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+        adapter.set_logging(self.changes, self.terms)
+        adapter.create_category('X', 'x-cat')
+        adapter.set_post_categories(
+            123, [1], old_category_ids=[2], post_title='Hello',
+        )
+        adapter.set_logging()
+
+        adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS, dry_run=False,
+            restore_log_path=self.restore_log,
+        )
+        self.assertTrue(os.path.exists(self.restore_log))
+        with open(self.restore_log) as f:
+            lines = f.readlines()
+        # Header + at least 2 ops (SET_CATS + CREATE_CAT inverse).
+        self.assertGreaterEqual(len(lines), 3)
+        self.assertIn('kind', lines[0])  # header row
+
+    def test_restore_log_written_during_snapshot(self):
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+        adapter.create_category('X', 'x-cat')
+
+        adapter.restore(
+            backup_path=self.backup,
+            mode=MODE_SNAPSHOT, dry_run=False,
+            restore_log_path=self.restore_log,
+        )
+        self.assertTrue(os.path.exists(self.restore_log))
+        with open(self.restore_log) as f:
+            content = f.read()
+        self.assertIn('delete_category', content)
+
+    def test_no_restore_log_on_dry_run(self):
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.backup(self.backup)
+
+        adapter.restore(
+            backup_path=self.backup,
+            mode=MODE_SNAPSHOT, dry_run=True,
+            restore_log_path=self.restore_log,
+        )
+        self.assertFalse(os.path.exists(self.restore_log))
+
+
 class TestReadBackVerification(unittest.TestCase):
     """Tests for post-mutation read-back verification."""
 

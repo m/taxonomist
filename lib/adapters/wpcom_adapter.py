@@ -738,6 +738,9 @@ class WpcomAdapter:
         'timestamp', 'action', 'term_id', 'slug',
         'field', 'old_value', 'new_value',
     )
+    RESTORE_LOG_HEADER = (
+        'timestamp', 'kind', 'detail', 'status', 'error',
+    )
 
     def set_logging(self, changes_log_path=None, terms_log_path=None):
         """
@@ -831,10 +834,28 @@ class WpcomAdapter:
             ),
         )
 
+    def _log_restore_op(self, path, op, status='ok', error=''):
+        """Stream a single restore operation to the audit TSV."""
+        ts = self._log_timestamp()
+        kind = op.get('kind', '?')
+        # Build a short detail string from whatever the op dict has.
+        detail_parts = []
+        for key in ('slug', 'post_id', 'restore_slug', 'field', 'restore_to'):
+            val = op.get(key)
+            if val is not None:
+                detail_parts.append(f'{key}={val}')
+        detail = '; '.join(detail_parts) or ''
+        self._append_tsv(
+            path,
+            self.RESTORE_LOG_HEADER,
+            (ts, kind, detail, status, str(error) if error else ''),
+        )
+
     # --- Restore ---
 
     def restore(self, backup_path=None, changes_log_path=None,
-                terms_log_path=None, mode=MODE_AUTO, dry_run=False):
+                terms_log_path=None, mode=MODE_AUTO, dry_run=False,
+                restore_log_path=None):
         """
         Revert a Taxonomist run.
 
@@ -848,14 +869,23 @@ class WpcomAdapter:
                 MODE_LOGS (force log replay; error if no logs), or
                 MODE_SNAPSHOT (force full backup replay).
             dry_run: If True, return planned operations without writing.
+            restore_log_path: Path for the restore audit TSV. Each
+                executed operation is streamed here as it completes so
+                a crash leaves a durable record of what actually ran.
+                Ignored during dry-run. Pass this instead of writing the
+                log from agent code — the adapter enforces it so an
+                agent that forgets the step can't produce a revert with
+                no audit trail.
 
         Returns:
-            Dict with keys: mode, operations, errors, dry_run.
+            Dict with keys: mode, operations, errors, partial, dry_run.
         """
         term_rows = _try_parse_log(terms_log_path, _parse_terms_tsv)
         change_rows = _try_parse_log(changes_log_path, _parse_changes_tsv)
         have_both_logs = bool(term_rows) and bool(change_rows)
         have_any_log = bool(term_rows) or bool(change_rows)
+
+        rlp = restore_log_path if not dry_run else None
 
         if mode == MODE_LOGS:
             if not have_any_log:
@@ -865,6 +895,7 @@ class WpcomAdapter:
                 )
             result = self.restore_from_logs(
                 change_rows, term_rows, dry_run=dry_run,
+                restore_log_path=rlp,
             )
         elif mode == MODE_AUTO and have_both_logs:
             # Require BOTH logs for an inverse replay. A partial replay
@@ -872,6 +903,7 @@ class WpcomAdapter:
             # deleted categories behind — worse than a full snapshot undo.
             result = self.restore_from_logs(
                 change_rows, term_rows, dry_run=dry_run,
+                restore_log_path=rlp,
             )
         else:
             # Snapshot fallback.
@@ -885,6 +917,7 @@ class WpcomAdapter:
             with open(backup_path, encoding='utf-8') as f:
                 result = self.restore_from_snapshot(
                     json.load(f), dry_run=dry_run,
+                    restore_log_path=rlp,
                 )
             if mode == MODE_AUTO and have_any_log and not have_both_logs:
                 present = 'terms' if term_rows else 'changes'
@@ -905,7 +938,8 @@ class WpcomAdapter:
             raise PartialRestoreError(result)
         return result
 
-    def restore_from_logs(self, change_rows, term_rows, dry_run=False):
+    def restore_from_logs(self, change_rows, term_rows, dry_run=False,
+                          restore_log_path=None):
         """
         Inverse-replay change and term log rows in reverse-time order.
 
@@ -948,12 +982,23 @@ class WpcomAdapter:
                     op = self._invert_op(source, row, dry_run, id_to_slug)
                     if op is not None:
                         operations.append(op)
+                        if restore_log_path and not dry_run:
+                            self._log_restore_op(
+                                restore_log_path, op, status='ok',
+                            )
                 except (WpcomApiError, ValueError, KeyError, TypeError) as e:
-                    errors.append({
+                    err = {
                         'source': source,
                         'row': dict(row),
                         'error': str(e),
-                    })
+                    }
+                    errors.append(err)
+                    if restore_log_path and not dry_run:
+                        self._log_restore_op(
+                            restore_log_path,
+                            {'kind': row.get('action', '?')},
+                            status='error', error=str(e),
+                        )
 
         return {
             'mode': MODE_LOGS,
@@ -1138,7 +1183,8 @@ class WpcomAdapter:
 
         return {'kind': 'unknown', 'source': source, 'action': action}
 
-    def restore_from_snapshot(self, backup_data, dry_run=False):
+    def restore_from_snapshot(self, backup_data, dry_run=False,
+                              restore_log_path=None):
         """
         Replay a full backup snapshot. Heavy-handed but works without logs.
 
@@ -1160,7 +1206,7 @@ class WpcomAdapter:
         errors = []
 
         def execute(op, fn, *args, verify=None):
-            """Run an op, verify the result, append to operations/errors."""
+            """Run an op, verify the result, stream to restore log."""
             operations.append(op)
             if dry_run:
                 return
@@ -1168,11 +1214,21 @@ class WpcomAdapter:
                 fn(*args)
             except WpcomApiError as e:
                 errors.append({'op': op, 'error': str(e)})
+                if restore_log_path:
+                    self._log_restore_op(
+                        restore_log_path, op,
+                        status='error', error=str(e),
+                    )
                 return
-            if verify:
-                err = verify()
-                if err:
-                    errors.append({'op': op, 'error': err})
+            verify_err = verify() if verify else None
+            if verify_err:
+                errors.append({'op': op, 'error': verify_err})
+            if restore_log_path:
+                self._log_restore_op(
+                    restore_log_path, op,
+                    status='verify_failed' if verify_err else 'ok',
+                    error=verify_err or '',
+                )
 
         with self._logging_suspended():
             backup_cats = backup_data.get('categories', [])
@@ -1307,8 +1363,17 @@ class WpcomAdapter:
                         ids.append(int(live['ID']))
                     if ids:
                         self.set_post_categories(int(post_id), ids)
+                    if restore_log_path:
+                        self._log_restore_op(
+                            restore_log_path, op, status='ok',
+                        )
                 except WpcomApiError as e:
                     errors.append({'op': op, 'error': str(e)})
+                    if restore_log_path:
+                        self._log_restore_op(
+                            restore_log_path, op,
+                            status='error', error=str(e),
+                        )
 
             # Step 4: restore default category.
             if default_slug:
