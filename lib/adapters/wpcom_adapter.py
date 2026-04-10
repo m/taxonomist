@@ -1392,8 +1392,11 @@ class WpcomAdapter:
             backup_slugs = {c.get('slug', '') for c in backup_cats}
             try:
                 current_default = self.get_default_category()
-            except WpcomApiError:
-                current_default = None
+            except WpcomApiError as e:
+                if e.status_code == 404:
+                    current_default = None
+                else:
+                    raise
             for live in live_cats:
                 slug = live.get('slug', '')
                 if not slug or slug in backup_slugs:
