@@ -114,6 +114,7 @@ Note: categories in post responses are returned as a hash keyed by name, not an 
 taxonomist/
 ├── AGENTS.md              # AI tool instructions (canonical)
 ├── CLAUDE.md              # Points to AGENTS.md
+├── CONTRIBUTING.md        # How to run tests and lint locally
 ├── config.json            # WordPress connection config (user creates)
 ├── agents/                # AI agent definitions
 │   ├── connect.md         # Detect and configure WordPress access
@@ -288,6 +289,8 @@ After applying category changes, perform a spot-check to catch any misapplied ca
 If any mismatches are found, fix them immediately and log the corrections. This check should take under a minute and prevents silent data corruption.
 
 ## Notes for Contributors
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run tests and lint locally.
 
 - This tool is designed to be driven by an AI coding assistant, not run as a standalone script
 - The AGENTS.md file is the primary interface — it tells the AI how to use the tool
