@@ -253,7 +253,10 @@ class TestAggregateResults(unittest.TestCase):
             self._write_result(tmpdir, 'result-001.json', [
                 {'post_id': 3, 'cats': ['Tech', 'AI'], 'new_cats': []},
             ])
-            suggestions, cat_counts, new_counts = aggregate_results(tmpdir)
+            result = aggregate_results(tmpdir)
+            suggestions = result['suggestions']
+            cat_counts = result['category_counts']
+            new_counts = result['new_category_counts']
             self.assertEqual(len(suggestions), 3)
             self.assertEqual(cat_counts['Tech'], 2)
             self.assertEqual(cat_counts['Music'], 1)
@@ -262,7 +265,10 @@ class TestAggregateResults(unittest.TestCase):
 
     def test_empty_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            suggestions, cat_counts, new_counts = aggregate_results(tmpdir)
+            result = aggregate_results(tmpdir)
+            suggestions = result['suggestions']
+            cat_counts = result['category_counts']
+            new_counts = result['new_category_counts']
             self.assertEqual(len(suggestions), 0)
             self.assertEqual(len(cat_counts), 0)
 
@@ -273,7 +279,7 @@ class TestAggregateResults(unittest.TestCase):
             ])
             with open(os.path.join(tmpdir, 'notes.txt'), 'w') as f:
                 f.write('ignore me')
-            suggestions, _, _ = aggregate_results(tmpdir)
+            suggestions = aggregate_results(tmpdir)['suggestions']
             self.assertEqual(len(suggestions), 1)
 
     def test_ignores_non_result_json(self):
@@ -284,7 +290,7 @@ class TestAggregateResults(unittest.TestCase):
             self._write_result(tmpdir, 'categories.json', [
                 {'post_id': 99, 'cats': ['Noise'], 'new_cats': []},
             ])
-            suggestions, _, _ = aggregate_results(tmpdir)
+            suggestions = aggregate_results(tmpdir)['suggestions']
             self.assertEqual(len(suggestions), 1)
             self.assertEqual(suggestions[0]['post_id'], 1)
 
@@ -296,7 +302,10 @@ class TestAggregateResults(unittest.TestCase):
             self._write_result(tmpdir, 'result-001.json', [
                 {'post_id': 1, 'cats': ['AI'], 'new_cats': ['ML']},
             ])
-            suggestions, cat_counts, new_counts = aggregate_results(tmpdir)
+            result = aggregate_results(tmpdir)
+            suggestions = result['suggestions']
+            cat_counts = result['category_counts']
+            new_counts = result['new_category_counts']
             self.assertEqual(len(suggestions), 1)
             self.assertEqual(suggestions[0]['cats'], ['AI'])
             self.assertEqual(cat_counts['AI'], 1)
@@ -311,7 +320,7 @@ class TestAggregateResults(unittest.TestCase):
             self._write_result(tmpdir, 'result-000.json', [
                 {'post_id': 1, 'cats': ['A'], 'new_cats': []},
             ])
-            suggestions, _, _ = aggregate_results(tmpdir)
+            suggestions = aggregate_results(tmpdir)['suggestions']
             # result-000 should come first due to sorted() filename order.
             self.assertEqual(suggestions[0]['post_id'], 1)
             self.assertEqual(suggestions[1]['post_id'], 99)
@@ -332,18 +341,22 @@ class TestValidateExport(unittest.TestCase):
                 'url': 'https://example.com/test',
             }
         ]
-        self.assertEqual(validate_export(posts), [])
+        result = validate_export(posts)
+        self.assertTrue(result['valid'])
+        self.assertEqual(result['errors'], [])
 
     def test_not_a_list(self):
-        errors = validate_export({'post_id': 1})
-        self.assertEqual(len(errors), 1)
-        self.assertIn('JSON array', errors[0])
+        result = validate_export({'post_id': 1})
+        self.assertFalse(result['valid'])
+        self.assertEqual(len(result['errors']), 1)
+        self.assertIn('JSON array', result['errors'][0])
 
     def test_missing_field(self):
         posts = [{'post_id': 1, 'title': 'Test'}]
-        errors = validate_export(posts)
-        self.assertTrue(any('missing "date"' in e for e in errors))
-        self.assertTrue(any('missing "content"' in e for e in errors))
+        result = validate_export(posts)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('missing "date"' in e for e in result['errors']))
+        self.assertTrue(any('missing "content"' in e for e in result['errors']))
 
     def test_wrong_type(self):
         posts = [
@@ -355,11 +368,14 @@ class TestValidateExport(unittest.TestCase):
                 'categories': ['Tech'],
             }
         ]
-        errors = validate_export(posts)
-        self.assertTrue(any('"post_id" should be int' in e for e in errors))
+        result = validate_export(posts)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('"post_id" should be int' in e for e in result['errors']))
 
     def test_empty_list_is_valid(self):
-        self.assertEqual(validate_export([]), [])
+        result = validate_export([])
+        self.assertTrue(result['valid'])
+        self.assertEqual(result['errors'], [])
 
     def test_category_lists_must_contain_strings(self):
         posts = [
@@ -373,8 +389,9 @@ class TestValidateExport(unittest.TestCase):
                 'url': 'https://example.com/test',
             }
         ]
-        errors = validate_export(posts)
-        self.assertTrue(any('"categories" must contain only strings' in e for e in errors))
+        result = validate_export(posts)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('"categories" must contain only strings' in e for e in result['errors']))
 
 
 class TestValidateSuggestions(unittest.TestCase):
@@ -385,32 +402,39 @@ class TestValidateSuggestions(unittest.TestCase):
             {'post_id': 1, 'cats': ['Tech'], 'new_cats': []},
             {'post_id': 2, 'cats': ['Music', 'Jazz']},
         ]
-        self.assertEqual(validate_suggestions(data), [])
+        result = validate_suggestions(data)
+        self.assertTrue(result['valid'])
+        self.assertEqual(result['errors'], [])
 
     def test_missing_post_id(self):
         data = [{'cats': ['Tech']}]
-        errors = validate_suggestions(data)
-        self.assertTrue(any('missing "post_id"' in e for e in errors))
+        result = validate_suggestions(data)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('missing "post_id"' in e for e in result['errors']))
 
     def test_missing_cats(self):
         data = [{'post_id': 1}]
-        errors = validate_suggestions(data)
-        self.assertTrue(any('missing "cats"' in e for e in errors))
+        result = validate_suggestions(data)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('missing "cats"' in e for e in result['errors']))
 
     def test_cats_wrong_type(self):
         data = [{'post_id': 1, 'cats': 'Tech'}]
-        errors = validate_suggestions(data)
-        self.assertTrue(any('"cats" must be list' in e for e in errors))
+        result = validate_suggestions(data)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('"cats" must be list' in e for e in result['errors']))
 
     def test_cats_entries_must_be_strings(self):
         data = [{'post_id': 1, 'cats': ['Tech', 7]}]
-        errors = validate_suggestions(data)
-        self.assertTrue(any('"cats" must contain only strings' in e for e in errors))
+        result = validate_suggestions(data)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('"cats" must contain only strings' in e for e in result['errors']))
 
     def test_new_cats_entries_must_be_strings(self):
         data = [{'post_id': 1, 'cats': ['tech'], 'new_cats': ['ml', 7]}]
-        errors = validate_suggestions(data)
-        self.assertTrue(any('"new_cats" must contain only strings' in e for e in errors))
+        result = validate_suggestions(data)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('"new_cats" must contain only strings' in e for e in result['errors']))
 
 
 class TestValidateBackup(unittest.TestCase):
@@ -430,17 +454,21 @@ class TestValidateBackup(unittest.TestCase):
                 {'post_id': 1, 'post_title': 'Test', 'category_ids': [1], 'category_slugs': ['tech']}
             ],
         }
-        self.assertEqual(validate_backup(backup), [])
+        result = validate_backup(backup)
+        self.assertTrue(result['valid'])
+        self.assertEqual(result['errors'], [])
 
     def test_not_a_dict(self):
-        errors = validate_backup([])
-        self.assertIn('Backup must be a JSON object', errors)
+        result = validate_backup([])
+        self.assertFalse(result['valid'])
+        self.assertIn('Backup must be a JSON object', result['errors'])
 
     def test_missing_top_level_keys(self):
-        errors = validate_backup({})
-        self.assertTrue(any('timestamp' in e for e in errors))
-        self.assertTrue(any('categories' in e for e in errors))
-        self.assertTrue(any('default_category_slug' in e for e in errors))
+        result = validate_backup({})
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('timestamp' in e for e in result['errors']))
+        self.assertTrue(any('categories' in e for e in result['errors']))
+        self.assertTrue(any('default_category_slug' in e for e in result['errors']))
 
     def test_missing_category_fields(self):
         backup = {
@@ -449,9 +477,10 @@ class TestValidateBackup(unittest.TestCase):
             'categories': [{'name': 'Tech'}],
             'post_categories': [],
         }
-        errors = validate_backup(backup)
-        self.assertTrue(any('missing "term_id"' in e for e in errors))
-        self.assertTrue(any('missing "slug"' in e for e in errors))
+        result = validate_backup(backup)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('missing "term_id"' in e for e in result['errors']))
+        self.assertTrue(any('missing "slug"' in e for e in result['errors']))
 
     def test_missing_post_mapping_fields(self):
         backup = {
@@ -460,8 +489,9 @@ class TestValidateBackup(unittest.TestCase):
             'categories': [],
             'post_categories': [{'post_id': 1}],
         }
-        errors = validate_backup(backup)
-        self.assertTrue(any('missing "category_slugs"' in e for e in errors))
+        result = validate_backup(backup)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('missing "category_slugs"' in e for e in result['errors']))
 
 
 class TestParseChangeLog(unittest.TestCase):

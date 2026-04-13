@@ -261,8 +261,8 @@ def aggregate_results(results_dir):
         results_dir: Directory containing result-NNN.json files.
 
     Returns:
-        Tuple of (all_suggestions, category_counts, new_category_counts)
-        where suggestions is a list of dicts, and counts are Counters.
+        Dict with 'suggestions' (list of dicts), 'category_counts' (Counter),
+        and 'new_category_counts' (Counter).
     """
     suggestions_by_post_id = {}
     unkeyed_suggestions = []
@@ -288,7 +288,11 @@ def aggregate_results(results_dir):
         for cat in post.get('new_cats', []):
             new_cat_counts[cat] += 1
 
-    return all_suggestions, cat_counts, new_cat_counts
+    return {
+        'suggestions': all_suggestions,
+        'category_counts': cat_counts,
+        'new_category_counts': new_cat_counts,
+    }
 
 
 def validate_export(posts):
@@ -296,17 +300,16 @@ def validate_export(posts):
     Validate that an export JSON has the expected structure.
 
     Checks that each post has required fields with correct types.
-    Returns a list of error strings (empty if valid).
 
     Args:
         posts: Parsed JSON list from the export file.
 
     Returns:
-        List of validation error strings.
+        Dict with 'valid' (bool) and 'errors' (list of strings).
     """
     errors = []
     if not isinstance(posts, list):
-        return ['Export must be a JSON array']
+        return {'valid': False, 'errors': ['Export must be a JSON array']}
 
     required_fields = {
         'post_id': int,
@@ -339,7 +342,7 @@ def validate_export(posts):
                     f'"{field}" must contain only strings'
                 )
 
-    return errors
+    return {'valid': not errors, 'errors': errors}
 
 
 def validate_suggestions(suggestions):
@@ -353,11 +356,11 @@ def validate_suggestions(suggestions):
         suggestions: Parsed JSON list from a result file.
 
     Returns:
-        List of validation error strings.
+        Dict with 'valid' (bool) and 'errors' (list of strings).
     """
     errors = []
     if not isinstance(suggestions, list):
-        return ['Suggestions must be a JSON array']
+        return {'valid': False, 'errors': ['Suggestions must be a JSON array']}
 
     for i, entry in enumerate(suggestions):
         if not isinstance(entry, dict):
@@ -379,7 +382,7 @@ def validate_suggestions(suggestions):
             elif any(not isinstance(cat, str) for cat in entry['new_cats']):
                 errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "new_cats" must contain only strings')
 
-    return errors
+    return {'valid': not errors, 'errors': errors}
 
 
 def validate_backup(backup):
@@ -392,11 +395,11 @@ def validate_backup(backup):
         backup: Parsed JSON dict from a backup file.
 
     Returns:
-        List of validation error strings.
+        Dict with 'valid' (bool) and 'errors' (list of strings).
     """
     errors = []
     if not isinstance(backup, dict):
-        return ['Backup must be a JSON object']
+        return {'valid': False, 'errors': ['Backup must be a JSON object']}
 
     for key in ('timestamp', 'site_url', 'total_posts', 'total_categories', 'default_category_slug', 'categories', 'post_categories'):
         if key not in backup:
@@ -425,7 +428,7 @@ def validate_backup(backup):
                 if isinstance(pc.get('category_slugs'), list) and any(not isinstance(slug, str) for slug in pc['category_slugs']):
                     errors.append(f'Post mapping at index {i}: "category_slugs" must contain only strings')
 
-    return errors
+    return {'valid': not errors, 'errors': errors}
 
 
 def validate_result_ids(results_dir, batch_dir):
