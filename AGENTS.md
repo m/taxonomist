@@ -101,7 +101,11 @@ Taxonomist is registered as a WordPress.com OAuth2 app (Client ID: `136301`). Us
 Key endpoints:
 - `GET /sites/$site/categories` — list categories (max 1000 per page)
 - `GET /sites/$site/posts?number=100` — list posts (max 100 per page, use `page_handle` for pagination)
-- `POST /sites/$site/posts/$id` — update post categories (`categories` param: comma-separated names)
+- `POST /sites/$site/posts/$id` — update post. For category changes use
+  **v1.2** with `categories_by_id` (array of integer term IDs). This is
+  the only shape that is a true replace and cannot create junk
+  categories. Do not use the `categories` param on this endpoint — see
+  `agents/apply.md` for the silent-failure modes.
 - `POST /sites/$site/categories/new` — create category
 - `POST /sites/$site/categories/slug:$slug` — update category
 - `POST /sites/$site/categories/slug:$slug/delete` — delete category
