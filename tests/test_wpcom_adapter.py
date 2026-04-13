@@ -81,13 +81,41 @@ class TestWpcomAdapterInit(unittest.TestCase):
             WpcomAdapter(config)
         self.assertIn('site_id', str(ctx.exception))
 
-    def test_missing_access_token(self):
+    def test_init_without_token(self):
         config = {**VALID_CONFIG, 'connection': {
             'method': 'wpcom-api', 'site_id': '1',
         }}
-        with self.assertRaises(ValueError) as ctx:
-            WpcomAdapter(config)
-        self.assertIn('access_token', str(ctx.exception))
+        adapter = WpcomAdapter(config)
+        self.assertIsNone(adapter.access_token)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_read_without_token(self, mock_urlopen):
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '1',
+        }}
+        adapter = WpcomAdapter(config)
+        mock_urlopen.return_value = _mock_response({'categories': [], 'found': 0})
+        adapter.list_categories()
+        req = mock_urlopen.call_args[0][0]
+        self.assertFalse(req.has_header('Authorization'))
+
+    def test_write_without_token_raises(self):
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '1',
+        }}
+        adapter = WpcomAdapter(config)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.create_category('Test', 'test')
+        self.assertEqual(ctx.exception.error, 'auth_required')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_read_with_token_sends_auth(self, mock_urlopen):
+        adapter = WpcomAdapter(VALID_CONFIG)
+        mock_urlopen.return_value = _mock_response({'categories': [], 'found': 0})
+        adapter.list_categories()
+        req = mock_urlopen.call_args[0][0]
+        self.assertTrue(req.has_header('Authorization'))
+        self.assertIn('test-token-xxx', req.get_header('Authorization'))
 
 
 class TestListCategories(unittest.TestCase):
@@ -550,6 +578,55 @@ class TestBackup(unittest.TestCase):
             self.assertEqual(backup['default_category_slug'], 'tech')
             self.assertEqual(backup['categories'][0]['term_id'], 1)
             self.assertEqual(backup['post_categories'][0]['post_id'], 100)
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_backup_without_token_skips_default_category(self, mock_urlopen):
+        """Read-only backup must succeed when /settings returns 403.
+
+        The WordPress.com /sites/{id}/settings endpoint requires auth
+        even on public sites. A token-less backup should still work and
+        record default_category_slug as an empty string rather than
+        propagating the 403.
+        """
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': 'Technology', 'post_count': 5}
+        post = {
+            'ID': 100, 'title': 'Test',
+            'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+        }
+        forbidden = urllib.error.HTTPError(
+            'https://public-api.wordpress.com/rest/v1.1/sites/12345/settings',
+            403, 'Forbidden', {},
+            io.BytesIO(json.dumps({
+                'error': 'unauthorized',
+                'message': 'This endpoint does not allow unauthorized access.',
+            }).encode('utf-8')),
+        )
+        mock_urlopen.side_effect = [
+            # list_categories
+            _mock_response({'found': 1, 'categories': [cat]}),
+            # posts pagination
+            _mock_response({'found': 1, 'posts': [post], 'meta': {}}),
+            # get_default_category -> settings (403, no token)
+            forbidden,
+        ]
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '12345',
+        }}
+        adapter = WpcomAdapter(config)
+        self.assertIsNone(adapter.access_token)
+
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            with open(output_path) as f:
+                backup = json.load(f)
+            self.assertEqual(backup['default_category_slug'], '')
+            self.assertEqual(backup['total_posts'], 1)
+            self.assertEqual(backup['total_categories'], 1)
         finally:
             os.unlink(output_path)
 
