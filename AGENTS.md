@@ -143,16 +143,20 @@ taxonomist/
 
 ## Change Logging
 
-Every operation that modifies the site is logged to `data/logs/`. Each log file is a TSV with columns:
+Every operation that modifies the site is logged to `data/logs/`. Each apply run produces:
 
-```
-timestamp  action  post_id  post_title  old_categories  new_categories  cats_added  cats_removed
-```
-
-Log files:
-- `backup-{timestamp}.json` — Complete pre-change state (post→category mappings)
-- `changes-{timestamp}.tsv` — Every individual change made
-- `terms-deleted-{timestamp}.tsv` — Deleted category terms with their original data
+- `data/backups/backup-{timestamp}.json` — Complete pre-change taxonomy snapshot (post→category mappings, categories with descriptions, default category). Always written before any mutation.
+- `data/logs/changes-{timestamp}.tsv` — Per-post category assignment changes. Schema:
+  ```
+  timestamp  action  post_id  post_title  old_categories  new_categories  cats_added  cats_removed
+  ```
+  Action is `SET_CATS`. Written by `lib/apply-changes.php` (WP-CLI) and by `WpcomAdapter.set_post_categories()` when logging is enabled.
+- `data/logs/terms-{timestamp}.tsv` — Term-level operations (create / delete / update / set-default). Schema:
+  ```
+  timestamp  action  term_id  slug  field  old_value  new_value
+  ```
+  Actions are `CREATE_CAT`, `DELETE_CAT`, `UPDATE_CAT` (one row per changed field), and `SET_DEFAULT`. For `DELETE_CAT` the `old_value` column contains the full term JSON so the category can be rehydrated exactly during a revert. Written by the wpcom adapter; for WP-CLI sites the existing `restore.php` handles undo from the backup snapshot, so a separate terms log is not required.
+- `data/logs/restore-{timestamp}.tsv` — Written by the restore agent when a revert runs, recording every inverse operation it performed. Lets a revert itself be audited.
 
 ### Reverting Changes
 
@@ -161,7 +165,15 @@ To undo all changes from a session:
 "Revert the changes from {timestamp}"
 ```
 
-The AI will read the log and backup files and restore the exact previous state.
+The restore agent (`agents/restore.md`) will:
+1. Load the backup and the change/term logs.
+2. Detect the connection method from `config.json`.
+3. Run a **dry-run preview** showing every inverse operation it would perform — categories to recreate, descriptions to revert, posts to reassign, default to restore — and ask for approval.
+4. Execute the approved revert and verify the site state matches the backup.
+
+Two modes are supported. **Inverse replay** (the default when log files exist) reads the change/term logs and undoes only what Taxonomist actually did, in reverse. **Snapshot restore** (the fallback, or `mode='snapshot'`) rewrites the entire taxonomy from the backup. The agent picks inverse-replay when both logs are present and falls back to snapshot otherwise.
+
+For `wp-cli-*` connections the agent uses `lib/restore.php`. For `wpcom-api` it uses `WpcomAdapter.restore()`. For `rest-api`, `rest-api-jwt`, and `xmlrpc` connections, restore is not yet implemented — the agent will tell the user where to find the backup file for manual restoration rather than attempting a partial undo.
 
 ## Result Validation
 
