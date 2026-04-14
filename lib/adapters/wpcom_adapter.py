@@ -113,7 +113,8 @@ class WpcomAdapter:
 
         Args:
             config: Dict with 'site_url' and 'connection' containing
-                    'method', 'site_id', and 'access_token'.
+                    'method', 'site_id', and optionally 'access_token'.
+                    The token is only required for write operations.
 
         Raises:
             ValueError: If required config fields are missing.
@@ -126,10 +127,8 @@ class WpcomAdapter:
             )
         if not conn.get('site_id'):
             raise ValueError('Missing required field: connection.site_id')
-        if not conn.get('access_token'):
-            raise ValueError('Missing required field: connection.access_token')
         self.site_id = str(conn['site_id'])
-        self.access_token = conn['access_token']
+        self.access_token = conn.get('access_token')
         self.site_url = config.get('site_url', '')
         self._category_cache = None
         # When set via set_logging(), every mutating call appends to these
@@ -144,7 +143,7 @@ class WpcomAdapter:
 
     def _request(self, method, path, data=None, params=None):
         """
-        Make an authenticated request to the WordPress.com API.
+        Make a request to the WordPress.com API.
 
         Args:
             method: HTTP method (GET, POST).
@@ -156,7 +155,8 @@ class WpcomAdapter:
             Parsed JSON response as a dict.
 
         Raises:
-            WpcomApiError: On any API error (including 200 with error field).
+            WpcomApiError: On any API error (including 200 with error
+                field), or if a non-GET request is made without a token.
         """
         url = f'{self.BASE_URL}{path}'
         if params:
@@ -166,8 +166,12 @@ class WpcomAdapter:
         if data is not None:
             body = wp_urlencode(data).encode('utf-8')
 
+        if method != 'GET':
+            self._require_auth()
+
         req = urllib.request.Request(url, data=body, method=method)
-        req.add_header('Authorization', f'Bearer {self.access_token}')
+        if self.access_token:
+            req.add_header('Authorization', f'Bearer {self.access_token}')
         req.add_header('User-Agent', 'taxonomist/1.0')
         if body:
             req.add_header('Content-Type', 'application/x-www-form-urlencoded')
@@ -209,6 +213,15 @@ class WpcomAdapter:
 
     def _get(self, path, params=None):
         return self._request('GET', path, params=params)
+
+    def _require_auth(self):
+        """Raise if no access token is configured."""
+        if not self.access_token:
+            raise WpcomApiError(
+                401, 'auth_required',
+                'This operation requires an access_token in config.json. '
+                'Run the OAuth flow first.',
+            )
 
     def _post(self, path, data=None):
         return self._request('POST', path, data=data)
@@ -279,6 +292,75 @@ class WpcomAdapter:
         if not name:
             return None
         return self._find_category(lambda c: c.get('name') == name)
+
+    def _has_duplicate_slugs(self, slug):
+        """Check if more than one category shares this slug."""
+        count = sum(
+            1 for c in self._ensure_category_cache() if c['slug'] == slug
+        )
+        return count > 1
+
+    def _request_v2(self, method, path, data=None):
+        """
+        Make a request to the wp/v2 endpoint.
+
+        Used for ID-based category operations when the v1.1 slug-based
+        endpoint can't distinguish between categories with duplicate
+        slugs.
+
+        Args:
+            method: HTTP method (POST, DELETE).
+            path: Path relative to /wp/v2/sites/{site_id}/.
+            data: Dict to send as JSON body (optional).
+
+        Returns:
+            Parsed JSON response dict.
+
+        Raises:
+            WpcomApiError: On any API error.
+        """
+        url = (
+            f'https://public-api.wordpress.com/wp/v2'
+            f'/sites/{self.site_id}/{path}'
+        )
+        body = json.dumps(data).encode('utf-8') if data is not None else None
+        req = urllib.request.Request(url, data=body, method=method)
+        req.add_header('Authorization', f'Bearer {self.access_token}')
+        req.add_header('User-Agent', 'taxonomist/1.0')
+        req.add_header('Content-Type', 'application/json')
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp_body = resp.read().decode('utf-8')
+                try:
+                    return json.loads(resp_body)
+                except json.JSONDecodeError:
+                    raise WpcomApiError(
+                        resp.status, 'invalid_json',
+                        f'Expected JSON, got: {resp_body[:200]}',
+                    )
+        except urllib.error.HTTPError as e:
+            try:
+                body_text = e.read().decode('utf-8', errors='replace')
+            except Exception:
+                body_text = str(e)
+            try:
+                err = json.loads(body_text)
+                raise WpcomApiError(
+                    e.code, err.get('code', 'unknown'),
+                    err.get('message', body_text),
+                ) from e
+            except json.JSONDecodeError:
+                raise WpcomApiError(e.code, 'http_error', body_text) from e
+        except urllib.error.URLError as e:
+            raise WpcomApiError(
+                0, 'connection_error',
+                f'Failed to connect to {url}: {e.reason}',
+            ) from e
+
+    def _update_category_v2(self, term_id, fields):
+        """Update a category using the wp/v2 endpoint (ID-based)."""
+        return self._request_v2('POST', f'categories/{term_id}', data=fields)
 
     def _get_category_count(self):
         """Get the current total number of categories on the site."""
@@ -467,12 +549,17 @@ class WpcomAdapter:
         )
         return result
 
+    def _delete_category_v2(self, term_id):
+        """Delete a category using the wp/v2 endpoint (ID-based)."""
+        return self._request_v2('DELETE', f'categories/{term_id}?force=true')
+
     def delete_category(self, term_id):
         """
         Delete a category by term ID.
 
         Always resolves the term_id to its slug from live data before
-        deleting. Never guesses slugs. (Prevents issue #1.)
+        deleting. Never guesses slugs. (Prevents issue #1.) When
+        duplicate slugs exist, uses the wp/v2 ID-based endpoint.
 
         Args:
             term_id: Integer category ID.
@@ -493,10 +580,14 @@ class WpcomAdapter:
         # Capture the snapshot BEFORE the destructive call so revert can
         # rehydrate the category exactly.
         snapshot = json.dumps(_term_snapshot(cat), ensure_ascii=False)
-        slug = urllib.parse.quote(cat['slug'], safe='')
-        self._post(
-            f'/sites/{self.site_id}/categories/slug:{slug}/delete',
-        )
+
+        if self._has_duplicate_slugs(cat['slug']):
+            self._delete_category_v2(term_id)
+        else:
+            slug = urllib.parse.quote(cat['slug'], safe='')
+            self._post(
+                f'/sites/{self.site_id}/categories/slug:{slug}/delete',
+            )
         self._invalidate_category_cache()
         self._log_term_op(
             ACTION_DELETE_CAT,
@@ -513,10 +604,10 @@ class WpcomAdapter:
         """
         Update a category's fields.
 
-        Always includes the current parent in the payload to prevent
-        the WP.com API from silently creating a duplicate term at
-        root level. Verifies term count before and after to detect
-        duplicates. (Prevents issue #3.)
+        When the category's slug is unique, uses the v1.1 slug-based
+        endpoint with parent pinning and duplicate detection (issue #3).
+        When duplicate slugs exist, falls back to the wp/v2 ID-based
+        endpoint to avoid updating the wrong category.
 
         Args:
             term_id: Integer category ID.
@@ -552,6 +643,15 @@ class WpcomAdapter:
         # Always include parent to prevent silent duplicate creation.
         if 'parent' not in payload:
             payload['parent'] = current.get('parent', 0)
+
+        # Use wp/v2 ID-based endpoint when duplicate slugs exist,
+        # since the v1.1 slug-based endpoint can't distinguish them.
+        # The v2 path skips the pre/post term-count check because
+        # ID-based updates cannot create duplicate categories.
+        if self._has_duplicate_slugs(current['slug']):
+            result = self._update_category_v2(term_id, payload)
+            self._invalidate_category_cache()
+            return result
 
         pre_count = self._get_category_count()
 
@@ -692,13 +792,15 @@ class WpcomAdapter:
             if not page_handle or not resp.get('posts'):
                 break
 
-        # Resolve default category slug. Only suppress 404 (category
-        # genuinely missing); all other errors should propagate.
+        # Resolve default category slug. The /sites/{id}/settings endpoint
+        # requires authentication even on public sites, so suppress 401/403
+        # to allow read-only backups without a token. Also suppress 404
+        # (category genuinely missing). Other errors should propagate.
         try:
             default_cat = self.get_default_category()
             default_slug = default_cat.get('slug', '')
         except WpcomApiError as e:
-            if e.status_code == 404:
+            if e.status_code in (401, 403, 404):
                 default_slug = ''
             else:
                 raise

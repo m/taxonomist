@@ -217,7 +217,18 @@ Present flagged categories to the user for spot-checking before finalizing the p
 
 ## Analysis Approach
 
-Use `lib/helpers.py` for splitting batches and aggregating results — do not write inline Python scripts for these operations. Use `lib/helpers.aggregate_results()` to combine per-batch results.
+Use `lib/helpers.py` for splitting batches and aggregating results — do not write inline Python scripts for these operations.
+
+**Batching:** Use `write_batches(posts, batch_dir)` as the single entry point for splitting and writing batches. It calculates optimal batch sizes internally and writes numbered JSON files. Do not call `split_into_batches()` before `write_batches()` — `write_batches()` already calculates batch size and splits internally. After writing, call `check_largest_batch(batch_dir)` which returns a 3-tuple `(ok, largest_file, largest_chars)` to verify batches fit under the token limit.
+
+**Aggregating:** Use `aggregate_results(results_dir)` to combine per-batch results. It returns a dict:
+
+```python
+results = aggregate_results('data/results/')
+suggestions = results['suggestions']        # list of suggestion dicts
+category_counts = results['category_counts']  # Counter of slug -> count
+new_category_counts = results['new_category_counts']  # Counter of new cat -> count
+```
 
 Posts are split into adaptively-sized batches (calculated from actual content length to stay under the 10K token Read limit) and analyzed by parallel AI agents. Each agent receives:
 - The full post content (not truncated)

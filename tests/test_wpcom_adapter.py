@@ -91,13 +91,41 @@ class TestWpcomAdapterInit(unittest.TestCase):
             WpcomAdapter(config)
         self.assertIn('site_id', str(ctx.exception))
 
-    def test_missing_access_token(self):
+    def test_init_without_token(self):
         config = {**VALID_CONFIG, 'connection': {
             'method': 'wpcom-api', 'site_id': '1',
         }}
-        with self.assertRaises(ValueError) as ctx:
-            WpcomAdapter(config)
-        self.assertIn('access_token', str(ctx.exception))
+        adapter = WpcomAdapter(config)
+        self.assertIsNone(adapter.access_token)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_read_without_token(self, mock_urlopen):
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '1',
+        }}
+        adapter = WpcomAdapter(config)
+        mock_urlopen.return_value = _mock_response({'categories': [], 'found': 0})
+        adapter.list_categories()
+        req = mock_urlopen.call_args[0][0]
+        self.assertFalse(req.has_header('Authorization'))
+
+    def test_write_without_token_raises(self):
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '1',
+        }}
+        adapter = WpcomAdapter(config)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.create_category('Test', 'test')
+        self.assertEqual(ctx.exception.error, 'auth_required')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_read_with_token_sends_auth(self, mock_urlopen):
+        adapter = WpcomAdapter(VALID_CONFIG)
+        mock_urlopen.return_value = _mock_response({'categories': [], 'found': 0})
+        adapter.list_categories()
+        req = mock_urlopen.call_args[0][0]
+        self.assertTrue(req.has_header('Authorization'))
+        self.assertIn('test-token-xxx', req.get_header('Authorization'))
 
 
 class TestListCategories(unittest.TestCase):
@@ -170,6 +198,29 @@ class TestDeleteCategory(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 404)
 
 
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_uses_v2_for_duplicate_slugs_delete(self, mock_urlopen):
+        """Falls back to wp/v2 DELETE when slug is not unique."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            _mock_response({'deleted': True}),  # wp/v2 delete
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.delete_category(42)
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+        v2_call = mock_urlopen.call_args_list[1]
+        req = v2_call[0][0]
+        self.assertIn('/wp/v2/', req.full_url)
+        self.assertIn('/categories/42', req.full_url)
+        self.assertIn('force=true', req.full_url)
+        self.assertEqual(req.get_method(), 'DELETE')
+
+
 class TestUpdateCategory(unittest.TestCase):
     """Tests for category updates (issue #3 defenses)."""
 
@@ -229,6 +280,116 @@ class TestUpdateCategory(unittest.TestCase):
             adapter.update_category(42, {'description': 'new'})
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertIn('duplicate', ctx.exception.error)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_uses_v2_for_duplicate_slugs(self, mock_urlopen):
+        """Falls back to wp/v2 when slug is not unique."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            _mock_response({'id': 42, 'slug': 'reviews'}),  # wp/v2 update
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+        # The second call should be to wp/v2, not v1.1.
+        v2_call = mock_urlopen.call_args_list[1]
+        req = v2_call[0][0]
+        self.assertIn('/wp/v2/', req.full_url)
+        self.assertIn('/categories/42', req.full_url)
+        # wp/v2 uses JSON, not form-encoded.
+        self.assertEqual(req.get_header('Content-type'), 'application/json')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_uses_v1_for_unique_slugs(self, mock_urlopen):
+        """Uses v1.1 slug-based endpoint when no duplicate slugs."""
+        cat = {'ID': 42, 'name': 'Tech', 'slug': 'tech', 'parent': 0}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),  # cache
+            _mock_response({'found': 1}),  # pre-count
+            _mock_response({'ID': 42, 'slug': 'tech'}),  # v1.1 update
+            _mock_response({'found': 1}),  # post-count
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(mock_urlopen.call_count, 4)
+
+        update_call = mock_urlopen.call_args_list[2]
+        req = update_call[0][0]
+        self.assertIn('/v1.1/', req.full_url)
+        self.assertIn('slug:tech', req.full_url)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_v2_http_error(self, mock_urlopen):
+        """wp/v2 path raises WpcomApiError on HTTP errors."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        error_body = json.dumps({'code': 'term_not_found', 'message': 'Not found'}).encode()
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            urllib.error.HTTPError(None, 404, 'Not Found', {}, io.BytesIO(error_body)),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(ctx.exception.error, 'term_not_found')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_v2_invalid_json_response(self, mock_urlopen):
+        """wp/v2 path raises WpcomApiError on non-JSON success response."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        html_resp = MagicMock()
+        html_resp.status = 200
+        html_resp.read.return_value = b'<html>Maintenance</html>'
+        html_resp.__enter__ = lambda s: s
+        html_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            html_resp,
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(ctx.exception.error, 'invalid_json')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_v2_connection_error(self, mock_urlopen):
+        """wp/v2 path raises WpcomApiError on connection failure."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            urllib.error.URLError('Name resolution failed'),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(ctx.exception.error, 'connection_error')
+        self.assertIn('wp/v2', str(ctx.exception))
+
+    def test_has_duplicate_slugs(self):
+        """Detects when multiple categories share a slug."""
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter._category_cache = [
+            {'ID': 1, 'slug': 'reviews', 'parent': 0},
+            {'ID': 2, 'slug': 'reviews', 'parent': 5},
+            {'ID': 3, 'slug': 'tech', 'parent': 0},
+        ]
+        self.assertTrue(adapter._has_duplicate_slugs('reviews'))
+        self.assertFalse(adapter._has_duplicate_slugs('tech'))
+        self.assertFalse(adapter._has_duplicate_slugs('nonexistent'))
 
 
 class TestSetPostCategories(unittest.TestCase):
@@ -344,6 +505,7 @@ class TestErrorHandling(unittest.TestCase):
         with self.assertRaises(WpcomApiError) as ctx:
             adapter.list_categories()
         self.assertEqual(ctx.exception.status_code, 500)
+        error.close()
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
     def test_connection_error_raised(self, mock_urlopen):
@@ -426,6 +588,55 @@ class TestBackup(unittest.TestCase):
             self.assertEqual(backup['default_category_slug'], 'tech')
             self.assertEqual(backup['categories'][0]['term_id'], 1)
             self.assertEqual(backup['post_categories'][0]['post_id'], 100)
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_backup_without_token_skips_default_category(self, mock_urlopen):
+        """Read-only backup must succeed when /settings returns 403.
+
+        The WordPress.com /sites/{id}/settings endpoint requires auth
+        even on public sites. A token-less backup should still work and
+        record default_category_slug as an empty string rather than
+        propagating the 403.
+        """
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': 'Technology', 'post_count': 5}
+        post = {
+            'ID': 100, 'title': 'Test',
+            'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+        }
+        forbidden = urllib.error.HTTPError(
+            'https://public-api.wordpress.com/rest/v1.1/sites/12345/settings',
+            403, 'Forbidden', {},
+            io.BytesIO(json.dumps({
+                'error': 'unauthorized',
+                'message': 'This endpoint does not allow unauthorized access.',
+            }).encode('utf-8')),
+        )
+        mock_urlopen.side_effect = [
+            # list_categories
+            _mock_response({'found': 1, 'categories': [cat]}),
+            # posts pagination
+            _mock_response({'found': 1, 'posts': [post], 'meta': {}}),
+            # get_default_category -> settings (403, no token)
+            forbidden,
+        ]
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '12345',
+        }}
+        adapter = WpcomAdapter(config)
+        self.assertIsNone(adapter.access_token)
+
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            with open(output_path) as f:
+                backup = json.load(f)
+            self.assertEqual(backup['default_category_slug'], '')
+            self.assertEqual(backup['total_posts'], 1)
+            self.assertEqual(backup['total_categories'], 1)
         finally:
             os.unlink(output_path)
 
