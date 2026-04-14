@@ -1216,13 +1216,13 @@ class WpcomAdapter:
                             int(result['ID']),
                             {'parent': int(live_parent['ID'])},
                         )
-                    except WpcomApiError:
-                        op['note'] = (
+                    except WpcomApiError as e:
+                        op['verification'] = (
                             f'parent {backup_parent_id} found but could '
-                            'not be set'
+                            f'not be set: {e}'
                         )
                 else:
-                    op['note'] = (
+                    op['verification'] = (
                         f'parent {backup_parent_id} not found on live site'
                     )
             return op
