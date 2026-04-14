@@ -15,19 +15,42 @@ Read `config.json` for connection details. Read the change plan from the file pa
 ## Logging
 
 BEFORE making any changes, create:
-- `data/backups/pre-apply-{timestamp}.json` — snapshot of every post's current categories
+- `data/backups/backup-{timestamp}.json` — full pre-apply taxonomy snapshot. For WP-CLI: `wp eval-file lib/backup.php`. For WordPress.com: `WpcomAdapter.backup('data/backups/backup-{timestamp}.json')`.
 
-For bulk post category changes applied through `lib/apply-changes.php`, write to `data/logs/changes-{timestamp}.tsv` with the schema the script actually emits:
-```
-timestamp	action	post_id	post_title	old_categories	new_categories	cats_added	cats_removed
+Two TSV logs are written during the apply run. They live next to the backup and the restore agent reads them to do a precise inverse replay:
+
+- `data/logs/changes-{timestamp}.tsv` — per-post category changes. Schema:
+  ```
+  timestamp	action	post_id	post_title	old_categories	new_categories	cats_added	cats_removed
+  ```
+  Action: `SET_CATS`.
+- `data/logs/terms-{timestamp}.tsv` — term operations. Schema:
+  ```
+  timestamp	action	term_id	slug	field	old_value	new_value
+  ```
+  Actions: `CREATE_CAT`, `DELETE_CAT`, `UPDATE_CAT` (one row per changed field), `SET_DEFAULT`. For `DELETE_CAT`, `old_value` is the full pre-delete term encoded as JSON so the category can be rehydrated exactly during revert.
+
+**For WordPress.com sites you MUST use the `WpcomAdapter` for every term and post mutation, with logging enabled.** The adapter writes both TSV logs automatically — do not perform create/update/delete/post-assignment via raw curl, because curl calls bypass the logger and break revert. Enable logging once at the start of the run:
+
+```python
+import json, sys
+sys.path.insert(0, 'lib')
+sys.path.insert(0, 'lib/adapters')
+from wpcom_adapter import WpcomAdapter
+
+with open('config.json') as f:
+    config = json.load(f)
+adapter = WpcomAdapter(config)
+ts = '{timestamp}'  # the same timestamp you used for the backup file
+adapter.set_logging(
+    changes_log_path=f'data/logs/changes-{ts}.tsv',
+    terms_log_path=f'data/logs/terms-{ts}.tsv',
+)
 ```
 
-`lib/apply-changes.php` currently logs `SET_CATS` rows for post-level category changes only. If you create, delete, merge, or update terms outside that script, record those operations in a separate session log before you apply them so they can still be audited and reversed.
+Then call `adapter.create_category(...)`, `adapter.update_category(...)`, `adapter.delete_category(...)`, `adapter.set_post_categories(...)`, `adapter.set_default_category(...)` and the rows are written for you.
 
-For deleted terms, also write to `data/logs/terms-deleted-{timestamp}.tsv`:
-```
-timestamp	term_id	name	slug	description	count	merged_into
-```
+For WP-CLI sites, `lib/apply-changes.php` writes `changes-{timestamp}.tsv` directly (post-level changes only). The terms log is not required for WP-CLI — the existing `lib/restore.php` reverts WP-CLI runs from the backup snapshot.
 
 ## Safety & Shell Escaping
 
@@ -51,9 +74,9 @@ curl -X POST -u user:pass {url}/wp-json/wp/v2/categories -d '{"name":"...","slug
 Pattern: get posts in source → add target to each → remove source from each → delete source term.
 Log every post touched.
 
-### Set Post Categories (bulk)
+### Set Post Categories (bulk) — WP-CLI
 
-**You MUST use `lib/apply-changes.php` for bulk category updates. Do not write inline PHP loops — the script handles paginated processing, secure TSV logging, slug resolution, and taxonomy drift detection.**
+**You MUST use `lib/apply-changes.php` for bulk category updates on WP-CLI sites. Do not write inline PHP loops — the script handles paginated processing, secure TSV logging, slug resolution, and taxonomy drift detection.**
 
 ```bash
 # Preview what would change (default mode)
@@ -69,58 +92,65 @@ TAXONOMIST_REMOVE_CATS=asides \
 wp eval-file lib/apply-changes.php
 ```
 
-For individual post updates via REST API:
-```bash
-# REST API
-curl -X POST -u user:pass {url}/wp-json/wp/v2/posts/{id} -d '{"categories":[1,2,3]}'
-# WordPress.com API (uses category names, not IDs)
-curl -X POST -H 'Authorization: Bearer TOKEN' \
-  --data-urlencode 'categories=Tech,WordPress' \
-  'https://public-api.wordpress.com/rest/v1.2/sites/SITE_ID/posts/POST_ID'
+### Set Post Categories (bulk) — WordPress.com
+
+**You MUST use `WpcomAdapter.set_post_categories()` for WordPress.com sites.** Do not call the WP.com posts endpoint via raw curl — that bypasses the changes-{timestamp}.tsv log and breaks revert.
+
+```python
+adapter.set_post_categories(
+    post_id=123,
+    category_ids=[5, 7],
+    old_category_ids=[5, 9],   # required for the inverse-replay log
+    post_title='Hello world',  # display only
+)
 ```
+
+Always pass `old_category_ids` from your in-memory export so the adapter doesn't have to make an extra fetch per post. The adapter writes one `SET_CATS` row to the changes log automatically.
 
 ### Create Category
 ```bash
 # WP-CLI
 wp term create category "Name" --slug=slug --description="..."
-# WordPress.com API
-curl -X POST -H 'Authorization: Bearer TOKEN' \
-  --data-urlencode 'name=Name' --data-urlencode 'description=...' \
-  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories/new'
+```
+```python
+# WordPress.com — adapter logs CREATE_CAT to terms-{timestamp}.tsv
+adapter.create_category(name='Name', slug='slug', description='...')
 ```
 
 ### Update Category
-```bash
-# WordPress.com API
-curl -X POST -H 'Authorization: Bearer TOKEN' \
-  --data-urlencode 'description=New description' \
-  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories/slug:SLUG'
+```python
+# WordPress.com — adapter logs one UPDATE_CAT row per changed field
+adapter.update_category(term_id=49, fields={'description': 'New description'})
 ```
 
 ### Delete Category
-NEVER delete a category without first reassigning its posts. Log the deleted term's full data.
+NEVER delete a category without first reassigning its posts.
 
 **CRITICAL: Check the default category first.** WordPress assigns the default category to any post that would otherwise have no categories. Deleting it causes problems.
 
 ```bash
 # WP-CLI — get the default category ID
 wp option get default_category
-# REST API
-curl -s -u user:pass {url}/wp-json/wp/v2/settings | python3 -c "import sys,json; print(json.load(sys.stdin).get('default_category'))"
-# WordPress.com API
-curl -s -H 'Authorization: Bearer TOKEN' 'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/settings' | python3 -c "import sys,json; print(json.load(sys.stdin).get('settings',{}).get('default_category'))"
+```
+```python
+# WordPress.com
+default = adapter.get_default_category()
+print(default['ID'], default['slug'])
 ```
 
 If you need to retire the default category, change the default first:
 ```bash
 wp option update default_category NEW_TERM_ID
 ```
+```python
+# WordPress.com — adapter logs SET_DEFAULT to terms-{timestamp}.tsv
+adapter.set_default_category(NEW_TERM_ID)
+```
 
 Never delete the default category without changing the setting first.
-```bash
-# WordPress.com API
-curl -X POST -H 'Authorization: Bearer TOKEN' \
-  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories/slug:SLUG/delete'
+```python
+# WordPress.com — adapter logs DELETE_CAT (with the full pre-delete term as JSON) to terms-{timestamp}.tsv
+adapter.delete_category(term_id=88)
 ```
 
 ## Execution Order
@@ -141,9 +171,13 @@ curl -X POST -H 'Authorization: Bearer TOKEN' \
 
 ## Revert
 
-**You MUST use `lib/restore.php` for reverting changes. Do not write inline PHP loops.** The restore script handles recreating deleted terms, resolving parent hierarchy, fixing name collisions, restoring the default category setting, and flushing caches.
+Reverting is handled by a dedicated agent: see `agents/restore.md`. Do not write your own undo logic.
 
-```bash
-# Perform a full authoritative restore from a backup file
-TAXONOMIST_BACKUP=/path/to/data/backups/backup-{timestamp}.json wp eval-file lib/restore.php
-```
+The restore agent dispatches by connection method:
+
+- **WP-CLI** sites use `lib/restore.php` (full snapshot replay):
+  ```bash
+  TAXONOMIST_BACKUP=/path/to/data/backups/backup-{timestamp}.json wp eval-file lib/restore.php
+  ```
+- **WordPress.com** sites use `WpcomAdapter.restore()`, which prefers inverse-replay of `changes-{timestamp}.tsv` + `terms-{timestamp}.tsv` (only undoes what the apply run actually did) and falls back to a snapshot replay from `backup-{timestamp}.json` when the logs are missing. Both modes support `dry_run=True` so the restore agent can preview every operation before executing.
+- **REST API / JWT / XML-RPC** are not yet supported by the restore agent. The pre-apply backup file is still written for these connections so a manual restore is possible.
