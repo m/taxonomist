@@ -27,7 +27,6 @@ from adapters.wpcom_adapter import (
     MODE_AUTO, MODE_LOGS, MODE_SNAPSHOT,
 )
 
-
 VALID_CONFIG = {
     'site_url': 'https://example.wordpress.com',
     'connection': {
