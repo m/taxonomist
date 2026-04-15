@@ -38,7 +38,12 @@ All configuration should happen through the conversation. Ask for credentials in
    - Save credentials to config.json — it's gitignored so it never gets committed
    - Never show credentials in curl output — read from config.json
 6. Test the connection by listing categories
-7. Write config.json with everything needed to reconnect without re-authenticating:
+7. **Verify capabilities (HARD GATE)** — before writing config.json or proceeding to export, confirm the authenticated account has the capability Taxonomist actually needs. See the "Capability Verification" section below for the exact probe per method. If the account lacks `manage_categories`:
+   - Tell the user explicitly which role was detected (e.g., "Contributor") and which capability is missing.
+   - Offer three choices via `AskUserQuestion`: (a) re-authenticate with a higher-privilege account, (b) abort, or (c) continue in read-only mode (dry-run plan only, no apply).
+   - If the user picks (c), set `"read_only": true` in config.json so downstream steps know to stop at the plan.
+   - Do NOT silently fall through. Running the analyze step against a contributor-level token wastes tokens and time.
+8. Write config.json with everything needed to reconnect without re-authenticating:
    ```json
    {
      "site_url": "https://example.com",
@@ -188,11 +193,69 @@ Save token to config.json (gitignored):
 
 Test by reading token from config and curling the API.
 
+## Capability Verification
+
+Taxonomist needs to create, update, and delete categories. That requires `manage_categories`. In WordPress role terms, this is **Editor** or **Administrator**. Contributor and Author roles cannot complete an apply.
+
+Run the probe that matches the connection method. If the probe indicates the account lacks `manage_categories`, STOP and apply the gate described in step 7.
+
+### WordPress.com / Jetpack API
+
+`GET /rest/v1.1/sites/$site` returns the site info including a `capabilities` object scoped to the authenticated user for that site.
+
+```bash
+TOKEN=$(python3 -c "import json; print(json.load(open('config.json'))['connection']['access_token'])")
+SITE=$(python3 -c "import json; print(json.load(open('config.json'))['connection']['site_id'])")
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://public-api.wordpress.com/rest/v1.1/sites/$SITE?fields=ID,URL,capabilities" \
+  | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+caps = data.get('capabilities', {})
+if not caps.get('manage_categories'):
+    print('MISSING: manage_categories')
+    sys.exit(1)
+print('OK: manage_categories verified')
+"
+```
+
+If the user has Contributor access, `manage_categories` will be `false` even though the token can read categories.
+
+### REST API + Application Password / JWT
+
+Fetch `/wp-json/wp/v2/users/me?context=edit` with the credentials. The `capabilities` field lists every capability the account has.
+
+```bash
+curl -s -u "$USER:$APP_PASSWORD" "$API_URL/wp/v2/users/me?context=edit" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+if not data.get('capabilities', {}).get('manage_categories'):
+    print('MISSING: manage_categories')
+    sys.exit(1)
+print(f'OK: role={list(data.get(\"roles\", []))}, manage_categories verified')
+"
+```
+
+If the endpoint returns 401/403, the token lacks even `edit` context and definitely cannot apply changes.
+
+### WP-CLI (SSH or local)
+
+```bash
+# Replace {USER} with the account whose credentials WP-CLI will run as (usually the SSH user's mapped WP user, or --user= in wp_cli_flags).
+wp cap list "$USER" | grep -Fx manage_categories
+```
+
+If the grep prints nothing, the capability is missing.
+
+### XML-RPC
+
+XML-RPC does not expose granular capabilities. Use `wp.getUsersBlogs` + `wp.getProfile` to read the role string; assume any role below Editor is insufficient and warn the user.
+
 ## Important
 
 - config.json is gitignored — credentials stay local, never committed
 - Test the connection before finalizing config
-- Verify write access (not just read) by checking if the user has edit_posts capability
+- **The capability probe is a hard gate, not a nice-to-have.** Running Export and Analyze burns tokens. Never run them against a site without first confirming the account can actually apply the result.
 - Connection method preference: WP-CLI SSH > WP-CLI local > WordPress.com API > REST API + App Password > REST API + JWT > XML-RPC
 - For WordPress.com hosted sites, the WordPress.com API is the natural choice
 - For self-hosted sites with Jetpack, offer the WordPress.com API as an option alongside direct REST API
