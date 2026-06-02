@@ -11,6 +11,14 @@ You apply category taxonomy changes to a WordPress site. Your #1 priority is **l
 ## Setup
 
 Read `config.json` for connection details. Read the change plan from the file path provided in your prompt.
+Also load `data/export/categories.json` (or the latest backup's `categories`
+array) before any term update/delete work so you have the exact exported
+`term_id` and `slug` for every category.
+Use `lib.helpers.resolve_category_export_row()` when you need to turn a plan
+item into the exact category record to update or delete.
+Treat exported `term_id` as the canonical identifier throughout the plan and
+apply steps. Only translate an ID to a slug or name at the final API call when
+the remote endpoint requires it.
 
 ## Logging
 
@@ -76,7 +84,7 @@ Log every post touched.
 
 ### Set Post Categories (bulk) — WP-CLI
 
-**You MUST use `lib/apply-changes.php` for bulk category updates on WP-CLI sites. Do not write inline PHP loops — the script handles paginated processing, secure TSV logging, slug resolution, and taxonomy drift detection.**
+**You MUST use `lib/apply-changes.php` for bulk category updates on WP-CLI sites. Do not write inline PHP loops — the script handles paginated processing, secure TSV logging, term ID resolution, and taxonomy drift detection.**
 
 ```bash
 # Preview what would change (default mode)
@@ -88,7 +96,7 @@ wp eval-file lib/apply-changes.php
 TAXONOMIST_MODE=apply \
 TAXONOMIST_SUGGESTIONS=/path/to/suggestions.json \
 TAXONOMIST_LOG=/path/to/changes.tsv \
-TAXONOMIST_REMOVE_CATS=asides \
+TAXONOMIST_REMOVE_CATS=17 \
 wp eval-file lib/apply-changes.php
 ```
 
@@ -106,6 +114,8 @@ adapter.set_post_categories(
 ```
 
 Always pass `old_category_ids` from your in-memory export so the adapter doesn't have to make an extra fetch per post. The adapter writes one `SET_CATS` row to the changes log automatically.
+
+### Individual Post Updates
 
 For individual post updates via REST API:
 ```bash
@@ -150,6 +160,29 @@ names drift when a category is renamed upstream of the call.
   before POSTing, and diff the response's `terms.category` against what
   you sent to detect drops.
 
+**Custom Taxonomies**: To update custom taxonomies via the WordPress.com API, you MUST use the `terms` parameter. If you use Python to build the query, avoid the "stringified list" bug by using the `wp_urlencode` helper:
+
+```python
+from lib.helpers import wp_urlencode
+params = {
+    "terms": {
+        "kb_category": ["General", "Settings"]
+    }
+}
+# returns "terms%5Bkb_category%5D%5B%5D=General&terms%5Bkb_category%5D%5B%5D=Settings"
+# (brackets are URL-encoded as %5B / %5D; PHP/WordPress decodes them
+# back to terms[kb_category][]=General&terms[kb_category][]=Settings)
+query = wp_urlencode(params)
+```
+
+Or via `curl`:
+```bash
+curl -X POST -H 'Authorization: Bearer TOKEN' \
+  --data-urlencode 'terms[kb_category][]=General' \
+  --data-urlencode 'terms[kb_category][]=Settings' \
+  'https://public-api.wordpress.com/rest/v1.2/sites/SITE_ID/posts/POST_ID'
+```
+
 ### Create Category
 ```bash
 # WP-CLI
@@ -168,6 +201,13 @@ adapter.update_category(term_id=49, fields={'description': 'New description'})
 
 ### Delete Category
 NEVER delete a category without first reassigning its posts.
+
+Resolve the delete target from `data/export/categories.json` (or the backup's
+`categories` array) before issuing the delete:
+- Use the exported `term_id` for WP-CLI / REST API deletes
+- Use the exported `slug` for WordPress.com / Jetpack deletes
+- If the plan only has a display name, stop and enrich it first
+- Never guess a slug from the category name
 
 **CRITICAL: Check the default category first.** WordPress assigns the default category to any post that would otherwise have no categories. Deleting it causes problems.
 

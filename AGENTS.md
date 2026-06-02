@@ -112,6 +112,11 @@ Key endpoints:
 - `POST /sites/$site/categories/slug:$slug/delete` — delete category
 
 Note: categories in post responses are returned as a hash keyed by name, not an array of IDs.
+Use exported `term_id` values as the canonical category identifier throughout
+analysis and apply. For category updates or deletes, resolve the exact
+`term_id` / `slug` from `data/export/categories.json` (or the backup
+`categories` array) first, and only translate to slug/name at the API
+boundary when required. Never construct a slug from the display name.
 
 ## Directory Structure
 
@@ -223,7 +228,7 @@ Present flagged categories to the user for spot-checking before finalizing the p
 
 ## Analysis Approach
 
-Use `lib/helpers.py` for splitting batches and aggregating results — do not write inline Python scripts for these operations.
+Use `lib/helpers.py` for splitting batches, aggregating results, and encoding WordPress API parameters (to avoid the array stringification bug) — do not write inline Python scripts for these operations. Use `lib.helpers.wp_urlencode()` for safe parameter encoding.
 
 **Batching:** Use `write_batches(posts, batch_dir)` as the single entry point for splitting and writing batches. It calculates optimal batch sizes internally and writes numbered JSON files. Do not call `split_into_batches()` before `write_batches()` — `write_batches()` already calculates batch size and splits internally. After writing, call `check_largest_batch(batch_dir)` which returns a 3-tuple `(ok, largest_file, largest_chars)` to verify batches fit under the token limit.
 
