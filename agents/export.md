@@ -103,7 +103,7 @@ After exporting:
 Batch size is calculated automatically from content length to stay under the Read tool token limit. After writing, verify the largest batch fits:
 
 ```python
-from lib.helpers import write_batches, check_largest_batch
+from lib.helpers import write_batches, check_largest_batch, find_incomplete_batches
 import json
 with open('data/export/posts.json') as f:
     posts = json.load(f)
@@ -123,6 +123,25 @@ import helpers; reload(helpers)
 paths, batch_size = helpers.write_batches(posts, 'data/batches/')
 ```
 Repeat until the Read succeeds. This discovers the actual limit for the current environment.
+
+### Resuming After Interruption
+
+If the user is re-running analysis after a previous session was interrupted, pass `resume=True` to reuse existing batches when the post set hasn't changed:
+
+```python
+paths, batch_size = write_batches(posts, 'data/batches/', resume=True)
+```
+
+This compares a fingerprint of the current post IDs against the stored manifest. If the posts are the same, existing batch files are reused without rewriting. If posts have changed, batches are regenerated automatically.
+
+To find which batches still need analysis, use `find_incomplete_batches`:
+
+```python
+incomplete = find_incomplete_batches('data/batches/', 'data/results/')
+print(f'{len(incomplete)} of {len(paths)} batches need analysis')
+```
+
+Only launch analyze agents for the incomplete batches. Report to the user how many batches are being skipped.
 
 ## Backup
 
