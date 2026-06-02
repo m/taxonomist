@@ -159,9 +159,9 @@ Every operation that modifies the site is logged to `data/logs/`. Each apply run
 - `data/backups/backup-{timestamp}.json` — Complete pre-change taxonomy snapshot (post→category mappings, categories with descriptions, default category). Always written before any mutation.
 - `data/logs/changes-{timestamp}.tsv` — Per-post category assignment changes. Schema:
   ```
-  timestamp  action  post_id  post_title  old_categories  new_categories  cats_added  cats_removed
+  timestamp  action  post_id  post_title  old_categories  new_categories  cats_added  cats_removed  old_category_slugs  new_category_slugs
   ```
-  Action is `SET_CATS`. Written by `lib/apply-changes.php` (WP-CLI) and by `WpcomAdapter.set_post_categories()` when logging is enabled.
+  Action is `SET_CATS`. Written by `lib/apply-changes.php` (WP-CLI) and by `WpcomAdapter.set_post_categories()` when logging is enabled. The `*_categories` columns hold display names for human readability; the `*_category_slugs` columns hold slugs and are the canonical key inverse-replay revert resolves against (slugs are unique per taxonomy and survive a delete+recreate, whereas display names can be ambiguous and term IDs change on recreation). Logs without the slug columns fall back to name-based resolution.
 - `data/logs/terms-{timestamp}.tsv` — Term-level operations (create / delete / update / set-default). Schema:
   ```
   timestamp  action  term_id  slug  field  old_value  new_value

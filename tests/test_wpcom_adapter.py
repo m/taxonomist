@@ -1357,6 +1357,21 @@ class TestLogging(unittest.TestCase):
         rows = parse_change_log(self.changes)
         self.assertEqual(rows[0]['old_categories'], '')
 
+    def test_set_post_categories_logs_slugs(self):
+        """The change log records category slugs so revert can resolve by
+        the stable, unique key rather than the ambiguous display name."""
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.set_logging(changes_log_path=self.changes)
+        adapter.set_post_categories(
+            123, [1, 2], old_category_ids=[2], post_title='Hello',
+        )
+        from helpers import parse_change_log
+        rows = parse_change_log(self.changes)
+        self.assertEqual(rows[0]['old_category_slugs'], 'tech')
+        self.assertEqual(
+            set(rows[0]['new_category_slugs'].split('|')), {'general', 'tech'},
+        )
+
     def test_set_default_logs(self):
         adapter = FakeWpcom(cats=_make_cats())
         adapter.set_logging(terms_log_path=self.terms)
@@ -1404,6 +1419,66 @@ class TestRestoreFromLogs(unittest.TestCase):
             dry_run=False,
         )
         return adapter, result
+
+    def test_revert_resolves_duplicate_names_by_slug(self):
+        """Two categories can share a display name under different slugs.
+        Inverse-replay must restore the exact original category by slug,
+        not pick whichever same-named one is first in the cache."""
+        cats = {
+            1: {'ID': 1, 'name': 'General', 'slug': 'general',
+                'description': '', 'parent': 0, 'post_count': 0},
+            10: {'ID': 10, 'name': 'News', 'slug': 'news-sports',
+                 'description': '', 'parent': 0, 'post_count': 0},
+            20: {'ID': 20, 'name': 'News', 'slug': 'news-politics',
+                 'description': '', 'parent': 0, 'post_count': 0},
+        }
+        posts = {123: {'ID': 123, 'title': 'Hello',
+                       'categories': {'News': cats[20]}}}
+        adapter = FakeWpcom(cats=cats, posts=posts)
+        adapter.backup(self.backup)
+        adapter.set_logging(self.changes, self.terms)
+        # Apply moves the post from news-politics (20) to news-sports (10).
+        adapter.set_post_categories(
+            123, [10], old_category_ids=[20], post_title='Hello',
+        )
+        adapter.set_logging()
+        result = adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS, dry_run=False,
+        )
+        self.assertFalse(result['errors'])
+        restored = [c['ID'] for c in adapter.posts[123]['categories'].values()]
+        self.assertEqual(restored, [20])
+
+    def test_revert_handles_pipe_in_category_name(self):
+        """A '|' in a category name must not corrupt the revert: the slug
+        is the canonical key, the '|'-joined names are display-only."""
+        cats = {
+            1: {'ID': 1, 'name': 'General', 'slug': 'general',
+                'description': '', 'parent': 0, 'post_count': 0},
+            30: {'ID': 30, 'name': 'Tips | Tricks', 'slug': 'tips-tricks',
+                 'description': '', 'parent': 0, 'post_count': 0},
+        }
+        posts = {123: {'ID': 123, 'title': 'Hello',
+                       'categories': {'Tips | Tricks': cats[30]}}}
+        adapter = FakeWpcom(cats=cats, posts=posts)
+        adapter.backup(self.backup)
+        adapter.set_logging(self.changes, self.terms)
+        adapter.set_post_categories(
+            123, [1], old_category_ids=[30], post_title='Hello',
+        )
+        adapter.set_logging()
+        result = adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS, dry_run=False,
+        )
+        self.assertFalse(result['errors'])
+        restored = [c['ID'] for c in adapter.posts[123]['categories'].values()]
+        self.assertEqual(restored, [30])
 
     def test_reverts_post_that_had_no_categories(self):
         """Inverse-replay must clear a post back to zero categories when

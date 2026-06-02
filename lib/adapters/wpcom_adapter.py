@@ -544,6 +544,8 @@ class WpcomAdapter:
         names = [self._resolve_id_to_name(cid) for cid in category_ids]
 
         old_names = []
+        old_slugs = []
+        new_slugs = []
         # Distinguish "not provided" (None → unrevertable log row) from
         # "provided, but the post had no categories" ([] → a valid empty
         # old state). Only None is an error.
@@ -554,12 +556,17 @@ class WpcomAdapter:
                 'Pass the pre-change category IDs from the export so '
                 'the change log can record a reversible operation.'
             )
-        if self.changes_log_path and old_category_ids:
-            old_names = [
-                cat['name']
-                for cid in old_category_ids
-                for cat in (self._get_category_by_id(cid),)
-                if cat is not None
+        if self.changes_log_path:
+            for cid in old_category_ids or []:
+                cat = self._get_category_by_id(cid)
+                if cat is not None:
+                    old_names.append(cat['name'])
+                    old_slugs.append(cat.get('slug', ''))
+            # category_ids were already validated by _resolve_id_to_name
+            # above, so every lookup here resolves.
+            new_slugs = [
+                self._get_category_by_id(cid).get('slug', '')
+                for cid in category_ids
             ]
 
         # v1.2 + categories_by_id is the only sanctioned shape for
@@ -613,6 +620,8 @@ class WpcomAdapter:
                 new_categories=names,
                 cats_added=[n for n in names if n not in old_names],
                 cats_removed=[n for n in old_names if n not in names],
+                old_category_slugs=old_slugs,
+                new_category_slugs=new_slugs,
             )
 
     def _resolve_id_to_name(self, term_id):
@@ -1014,6 +1023,7 @@ class WpcomAdapter:
     POST_LOG_HEADER = (
         'timestamp', 'action', 'post_id', 'post_title',
         'old_categories', 'new_categories', 'cats_added', 'cats_removed',
+        'old_category_slugs', 'new_category_slugs',
     )
     TERM_LOG_HEADER = (
         'timestamp', 'action', 'term_id', 'slug',
@@ -1099,7 +1109,8 @@ class WpcomAdapter:
 
     def _log_post_change(self, action, post_id, post_title,
                          old_categories, new_categories,
-                         cats_added, cats_removed):
+                         cats_added, cats_removed,
+                         old_category_slugs=(), new_category_slugs=()):
         if not self.changes_log_path:
             return
         ts = self._log_timestamp()
@@ -1112,6 +1123,10 @@ class WpcomAdapter:
                 '|'.join(new_categories),
                 '|'.join(cats_added),
                 '|'.join(cats_removed),
+                # Slugs are the canonical revert key: unique per taxonomy,
+                # stable across a delete+recreate, and free of '|'.
+                '|'.join(old_category_slugs),
+                '|'.join(new_category_slugs),
             ),
         )
 
@@ -1295,25 +1310,40 @@ class WpcomAdapter:
 
         if source == SOURCE_CHANGE and action == ACTION_SET_CATS:
             post_id = int(row.get('post_id') or 0)
-            old_cat_names = [
-                n for n in (row.get('old_categories') or '').split('|') if n
-            ]
+            # Prefer slugs: unique per taxonomy (so duplicate display names
+            # can't map to the wrong category) and stable across a
+            # delete+recreate (the recreated term keeps its slug but gets a
+            # new ID). Fall back to names for logs written before slug
+            # columns existed or by the WP-CLI apply script.
+            old_slugs_raw = row.get('old_category_slugs')
+            by_slug = old_slugs_raw is not None
+            if by_slug:
+                keys = [s for s in old_slugs_raw.split('|') if s]
+            else:
+                keys = [
+                    n for n in (row.get('old_categories') or '').split('|')
+                    if n
+                ]
             op = {
                 'kind': 'set_post_categories',
                 'post_id': post_id,
-                'restore_to': old_cat_names,
+                'restore_to': keys,
                 'post_title': row.get('post_title', ''),
             }
             if dry_run:
                 return op
             ids = []
-            for name in old_cat_names:
-                cat = self._lookup_category_by_name(name)
+            for key in keys:
+                cat = (
+                    self._lookup_category_by_slug(key) if by_slug
+                    else self._lookup_category_by_name(key)
+                )
                 if cat is None:
+                    key_kind = 'slug' if by_slug else 'name'
                     raise WpcomApiError(
                         404, 'not_found',
                         f'Cannot restore post {post_id}: category '
-                        f'"{name}" no longer exists',
+                        f'{key_kind} "{key}" no longer exists',
                     )
                 ids.append(cat['ID'])
             # An empty old state means the post had no categories before the

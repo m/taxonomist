@@ -737,7 +737,9 @@ def parse_change_log(log_path):
     same way they were written by PHP's fputcsv().
 
     Returns dicts with keys: timestamp, action, post_id, post_title,
-    old_categories, new_categories, cats_added, cats_removed.
+    old_categories, new_categories, cats_added, cats_removed, and (for logs
+    written by the wpcom adapter) old_category_slugs, new_category_slugs.
+    Older logs without the slug columns simply omit those keys.
     """
     return _read_tsv_dicts(log_path)
 
