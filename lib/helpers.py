@@ -228,7 +228,7 @@ def find_incomplete_batches(batch_dir, results_dir):
         try:
             with open(result_path) as f:
                 data = json.load(f)
-            if validate_suggestions(data):
+            if not validate_suggestions(data)['valid']:
                 # Validation errors — treat as incomplete.
                 incomplete.append(batch_file)
                 continue
