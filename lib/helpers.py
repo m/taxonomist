@@ -614,36 +614,44 @@ def validate_result_ids(results_dir, batch_dir):
     }
 
 
-def validate_category_slugs(suggestions, valid_slugs):
+def validate_category_ids(suggestions, valid_ids):
     """
-    Check that every category slug in the suggestions exists in the valid set.
+    Check that every category term ID in the suggestions is recognized.
+
+    Analysis output puts integer term IDs in each suggestion's `cats`
+    list (see agents/analyze.md — "always output the term_id in cats"),
+    and validate_suggestions enforces that they are ints. This gate
+    therefore validates those IDs against the set of valid term IDs, not
+    against slug strings, so a stale or typo'd category reference is
+    caught before it reaches apply.
 
     Args:
-        suggestions: List of suggestion dicts (each with a 'cats' list).
-        valid_slugs: Set of valid category slug strings.
+        suggestions: List of suggestion dicts (each with a 'cats' list of
+            integer term IDs).
+        valid_ids: Set of valid category term IDs (ints).
 
     Returns:
         A dict with keys:
-            valid (bool): True if all slugs are recognized.
-            unknown_slugs (Counter): slug -> count of occurrences.
+            valid (bool): True if all IDs are recognized.
+            unknown_ids (Counter): term ID -> count of occurrences.
             errors (list[str]): Human-readable error descriptions.
     """
     unknown = Counter()
     for entry in suggestions:
         for cat in entry.get('cats', []):
-            if cat not in valid_slugs:
+            if cat not in valid_ids:
                 unknown[cat] += 1
 
     errors = []
     if unknown:
         errors.append(
-            f'{len(unknown)} unknown category slug(s): '
-            + ', '.join(f'{slug} ({n}x)' for slug, n in unknown.most_common(10))
+            f'{len(unknown)} unknown category term ID(s): '
+            + ', '.join(f'{cid} ({n}x)' for cid, n in unknown.most_common(10))
         )
 
     return {
         'valid': len(errors) == 0,
-        'unknown_slugs': unknown,
+        'unknown_ids': unknown,
         'errors': errors,
     }
 
