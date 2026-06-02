@@ -6,6 +6,25 @@ import subprocess
 import tempfile
 
 
+def _reject_option_like(value, label):
+    """Refuse a value that could be parsed as a command-line option.
+
+    A config or content value beginning with '-' can be interpreted by
+    ssh, scp, or wp as an option rather than data. For example a
+    ssh_user of '-oProxyCommand=touch /tmp/x' makes ssh run a local
+    command before connecting, and a category name of '--require=evil.php'
+    makes wp load arbitrary PHP. Fail closed rather than risk argument
+    injection. '--' separators are added at the call sites as well, but
+    OpenSSH still parses '-'-leading hostnames after '--', so this
+    validation is the load-bearing guard.
+    """
+    if isinstance(value, str) and value.startswith('-'):
+        raise ValueError(
+            f'{label} may not start with "-" (it would be parsed as a '
+            f'command-line option): {value!r}'
+        )
+
+
 class WpCliAdapter:
     """
     Adapter for interacting with WordPress via WP-CLI.
@@ -31,12 +50,15 @@ class WpCliAdapter:
         ssh_host = self.connection.get('ssh_host')
         if not ssh_user or not ssh_host:
             raise ValueError('wp-cli-ssh requires ssh_user and ssh_host')
+        _reject_option_like(ssh_user, 'ssh_user')
+        _reject_option_like(ssh_host, 'ssh_host')
         return f'{ssh_user}@{ssh_host}'
 
     def _run_remote_shell(self, command):
         """Run a safely quoted command string on the remote host over SSH."""
+        target = self._ssh_target()
         result = subprocess.run(
-            ['ssh', self._ssh_target(), command],
+            ['ssh', '--', target, command],
             capture_output=True,
             text=True,
         )
@@ -87,7 +109,8 @@ class WpCliAdapter:
                     env={'TAXONOMIST_OUTPUT': remote_output},
                 )
                 result = subprocess.run(
-                    ['scp', f'{self._ssh_target()}:{remote_output}', output_path],
+                    ['scp', '--',
+                     f'{self._ssh_target()}:{remote_output}', output_path],
                     capture_output=True,
                     text=True,
                 )
@@ -113,6 +136,12 @@ class WpCliAdapter:
 
     def create_category(self, name, slug, description=''):
         """Create a new category."""
+        # name is a bare positional; a '-'-leading value would be parsed
+        # by wp as a global flag (e.g. --require=). slug/description are
+        # bound to their --flag= token, but reject '-'-leading values too
+        # as defense in depth.
+        _reject_option_like(name, 'category name')
+        _reject_option_like(slug, 'category slug')
         args = ['term', 'create', 'category', name, f'--slug={slug}']
         if description:
             args.append(f'--description={description}')
