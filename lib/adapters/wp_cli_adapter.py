@@ -130,9 +130,19 @@ class WpCliAdapter:
         return output_path
 
     def set_post_categories(self, post_id, category_ids):
-        """Set categories for a post."""
-        ids_str = ','.join(map(str, category_ids))
-        return self._run_command(['post', 'term', 'set', str(post_id), 'category', ids_str])
+        """Set categories for a post by term ID.
+
+        Each term ID is passed as a separate positional argument with
+        --by=id. Comma-joining them into one token makes `wp post term
+        set` treat the value as a single slug; if no category has that
+        slug, wp silently CREATES a junk category named after the value
+        (e.g. setting term 390 created a category named "390"). --by=id
+        also stops a numeric term ID being matched against a slug.
+        """
+        args = ['post', 'term', 'set', str(post_id), 'category']
+        args.extend(str(cid) for cid in category_ids)
+        args.append('--by=id')
+        return self._run_command(args)
 
     def create_category(self, name, slug, description=''):
         """Create a new category."""
