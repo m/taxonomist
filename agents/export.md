@@ -27,6 +27,10 @@ Export to `data/export/categories.json`:
 }]
 ```
 
+These exported `term_id` and `slug` values are authoritative for later
+category updates/deletes. Keep them intact and resolve against this file
+during apply; never invent a slug by normalizing the display name.
+
 ### Posts
 Export to `data/export/posts.json`:
 ```json
@@ -36,6 +40,8 @@ Export to `data/export/posts.json`:
   "date": "2024-01-15 10:30:00",
   "content": "Full post content with HTML stripped...",
   "categories": ["Category1", "Category2"],
+  "category_ids": [1, 2],
+  "category_slugs": ["category1", "category2"],
   "url": "https://example.com/2024/01/post-slug/"
 }]
 ```
@@ -49,7 +55,7 @@ Export to `data/export/posts.json`:
 **You MUST use the provided scripts. Do not write inline PHP loops.**
 
 ```bash
-# Export posts — paginated, memory-safe, includes category slugs
+# Export posts — paginated, memory-safe, includes category IDs and slugs
 TAXONOMIST_OUTPUT=/path/to/posts.json wp eval-file lib/export-posts.php
 
 # Backup taxonomy state — paginated, includes default_category
@@ -59,7 +65,7 @@ TAXONOMIST_OUTPUT=/path/to/backup.json wp eval-file lib/backup.php
 ### REST API
 Paginate through posts: `GET /wp-json/wp/v2/posts?per_page=100&page=N&_fields=id,title,content,date,categories`
 Note: REST API returns rendered content — strip HTML after fetching.
-Category IDs need to be resolved to names via `GET /wp-json/wp/v2/categories?per_page=100`
+Resolve category IDs/slugs/names via `GET /wp-json/wp/v2/categories?per_page=100`
 
 ### WordPress.com / Jetpack API
 Base URL: `https://public-api.wordpress.com/rest/v1.1`
@@ -82,7 +88,7 @@ curl -H 'Authorization: Bearer TOKEN' \
   'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/posts?page_handle=HANDLE'
 ```
 
-Note: Categories in post responses are a hash keyed by name (`{"Tech": {"ID": 123, ...}}`), not an array. Convert to a name list when saving.
+Note: Categories in post responses are a hash keyed by name (`{"Tech": {"ID": 123, ...}}`), not an array. Convert them to saved `categories`, `category_ids`, and `category_slugs` fields when exporting.
 
 ### XML-RPC
 Use `wp.getPosts` with pagination. Limited to ~100 posts per call.
@@ -103,7 +109,7 @@ After exporting:
 Batch size is calculated automatically from content length to stay under the Read tool token limit. After writing, verify the largest batch fits:
 
 ```python
-from lib.helpers import write_batches, check_largest_batch
+from lib.helpers import write_batches, check_largest_batch, find_incomplete_batches
 import json
 with open('data/export/posts.json') as f:
     posts = json.load(f)
@@ -123,6 +129,25 @@ import helpers; reload(helpers)
 paths, batch_size = helpers.write_batches(posts, 'data/batches/')
 ```
 Repeat until the Read succeeds. This discovers the actual limit for the current environment.
+
+### Resuming After Interruption
+
+If the user is re-running analysis after a previous session was interrupted, pass `resume=True` to reuse existing batches when the post set hasn't changed:
+
+```python
+paths, batch_size = write_batches(posts, 'data/batches/', resume=True)
+```
+
+This compares a fingerprint of the current post IDs against the stored manifest. If the posts are the same, existing batch files are reused without rewriting. If posts have changed, batches are regenerated automatically.
+
+To find which batches still need analysis, use `find_incomplete_batches`:
+
+```python
+incomplete = find_incomplete_batches('data/batches/', 'data/results/')
+print(f'{len(incomplete)} of {len(paths)} batches need analysis')
+```
+
+Only launch analyze agents for the incomplete batches. Report to the user how many batches are being skipped.
 
 ## Backup
 

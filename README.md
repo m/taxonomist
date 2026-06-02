@@ -46,6 +46,10 @@ Every change is logged and reversible. Full backup before any modifications. Dry
 
 Posts are exported locally and split into batches. Parallel AI agents analyze the full content of every post and suggest optimal categories. Results are aggregated, reviewed with you, and applied via WP-CLI or REST API.
 
+## Contributing
+
+Contributions are welcome! Whether it's a bug fix, a new adapter, or improved analysis logic, we'd love your help. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to set up your environment and run tests and lint locally before submitting changes.
+
 ## Thanks
 
 Thanks to [Arun Sathiya](https://www.arun.blog/), Hannah Swain Løvik, Joash Rajin, and Rich Tabor for help testing.

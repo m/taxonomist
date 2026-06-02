@@ -27,19 +27,20 @@ For each post, read the title, date, and full content. Based on the actual subst
 
 ## Output Format
 
-Write a JSON file with one entry per post. Use category **slugs** (not display names)
-so the apply script can resolve them unambiguously. The category list you receive
-will include both names and slugs — always output the slug.
+Write a JSON file with one entry per post. Use category **term IDs** (not display
+names or slugs) so the apply script can use the exact exported category identity.
+The category list you receive will include names, slugs, and `term_id` values —
+always output the `term_id` in `cats`.
 
 ```json
 [{
   "post_id": 123,
-  "cats": ["wordpress", "open-source"],
+  "cats": [12, 34],
   "new_cats": [],
   "confidence": "high"
 }, {
   "post_id": 456,
-  "cats": ["personal"],
+  "cats": [56],
   "new_cats": ["photography"],
   "confidence": "medium"
 }]
@@ -62,3 +63,4 @@ Confidence levels:
 - Be accurate — wrong categories are worse than missing ones
 - **Only suggest categories that are directly about the post's topic.** Do not add a secondary category unless the post genuinely covers that second topic. A post about a specific hobby is not a generic "recreation" post. A bookmarked link is not a "book recommendation". A YouTube tutorial is not "tech" just because it's on YouTube.
 - `new_cats` should only contain truly novel categories that would apply to multiple posts, not one-off topics
+- When suggesting a new category, include a `"parent_slug"` if it logically belongs under an existing category (e.g., a new "Full Site Editing" category belongs under "Themes"). This helps the hierarchy tree view show where new categories fit.
