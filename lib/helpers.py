@@ -9,10 +9,10 @@ These run on the user's machine (not on WordPress) and handle:
 """
 
 import csv
+import hashlib
 import json
 import os
 from collections import Counter
-
 
 # Token limit for agent Read tool. Override via TAXONOMIST_MAX_BATCH_TOKENS env var.
 # Default 8000 gives headroom under the typical 10K limit. The export agent
@@ -77,7 +77,30 @@ def split_into_batches(posts, batch_size=None):
     return [posts[i:i + batch_size] for i in range(0, len(posts), batch_size)]
 
 
-def write_batches(posts, batch_dir, batch_size=None):
+def compute_batch_fingerprint(posts):
+    """
+    Compute a stable fingerprint from the post IDs in the list.
+
+    The fingerprint is a SHA-256 hex digest of the sorted post IDs.
+    Used to detect whether the post set has changed since the last
+    batch split, so resume logic knows if batches need regenerating.
+
+    Args:
+        posts: List of post dicts (each must have a 'post_id' key).
+
+    Returns:
+        Hex digest string.
+    """
+    post_ids = sorted(p.get('post_id', 0) for p in posts)
+    return hashlib.sha256(json.dumps(post_ids).encode()).hexdigest()
+
+
+def batch_manifest_path(batch_dir):
+    """Return the path to the batch manifest file in the given directory."""
+    return os.path.join(batch_dir, 'batch-manifest.json')
+
+
+def write_batches(posts, batch_dir, batch_size=None, resume=False):
     """
     Split posts into batches and write each to a numbered JSON file.
 
@@ -85,18 +108,43 @@ def write_batches(posts, batch_dir, batch_size=None):
     is not provided, it's calculated automatically to stay under the agent
     Read token limit (10K tokens).
 
-    Before writing, stale batch-NNN.json files are removed so reruns don't
-    leave behind extra batches from a previous export.
+    When resume=False (default), stale batch-NNN.json files are removed so
+    reruns don't leave behind extra batches from a previous export.
+
+    When resume=True, the function checks whether the post set has changed
+    since the last split by comparing fingerprints stored in
+    batch-manifest.json. If the fingerprint matches, existing batches are
+    reused without rewriting. If it doesn't match (or no manifest exists),
+    batches are cleared and rewritten.
 
     Args:
         posts: List of post dicts from the export JSON.
         batch_dir: Directory to write batch files into. Created if missing.
         batch_size: Posts per batch. If None, calculated from content sizes.
+        resume: If True, reuse existing batches when the post set is unchanged.
 
     Returns:
         Tuple of (paths_written, batch_size_used).
     """
     os.makedirs(batch_dir, exist_ok=True)
+    manifest_file = batch_manifest_path(batch_dir)
+
+    if resume:
+        fingerprint = compute_batch_fingerprint(posts)
+        if os.path.exists(manifest_file):
+            with open(manifest_file) as f:
+                manifest = json.load(f)
+            if manifest.get('fingerprint') == fingerprint:
+                # Post set unchanged — reuse existing batches.
+                existing_batch_size = manifest['batch_size']
+                num_batches = manifest['num_batches']
+                paths = [
+                    os.path.join(batch_dir, f'batch-{i:03d}.json')
+                    for i in range(num_batches)
+                ]
+                return paths, existing_batch_size
+
+    # Clear stale batch files.
     for filename in os.listdir(batch_dir):
         if filename.startswith('batch-') and filename.endswith('.json'):
             os.remove(os.path.join(batch_dir, filename))
@@ -110,6 +158,15 @@ def write_batches(posts, batch_dir, batch_size=None):
         with open(path, 'w') as f:
             json.dump(batch, f)
         paths.append(path)
+
+    # Write manifest for future resume.
+    with open(manifest_file, 'w') as f:
+        json.dump({
+            'fingerprint': compute_batch_fingerprint(posts),
+            'batch_size': batch_size,
+            'num_batches': len(batches),
+        }, f)
+
     return paths, batch_size
 
 
@@ -133,6 +190,63 @@ def check_largest_batch(batch_dir, max_chars=MAX_BATCH_CHARS):
     return largest_chars <= max_chars, largest_file, largest_chars
 
 
+def find_incomplete_batches(batch_dir, results_dir):
+    """
+    Find batches that don't have valid corresponding result files.
+
+    For each batch-NNN.json in batch_dir, checks whether a matching
+    result-NNN.json exists in results_dir and passes validation. Batches
+    with missing or invalid results are returned so they can be re-analyzed.
+
+    Args:
+        batch_dir: Directory containing batch-NNN.json files.
+        results_dir: Directory containing result-NNN.json files.
+
+    Returns:
+        List of batch filenames (e.g., ['batch-001.json']) that need
+        re-analysis, sorted by name.
+    """
+    batch_files = sorted(
+        f for f in os.listdir(batch_dir)
+        if f.startswith('batch-') and f.endswith('.json')
+        and f != 'batch-manifest.json'
+    )
+
+    if not os.path.isdir(results_dir):
+        return batch_files
+
+    incomplete = []
+    for batch_file in batch_files:
+        # batch-NNN.json → result-NNN.json
+        result_file = 'result-' + batch_file[len('batch-'):]
+        result_path = os.path.join(results_dir, result_file)
+
+        if not os.path.exists(result_path):
+            incomplete.append(batch_file)
+            continue
+
+        try:
+            with open(result_path) as f:
+                data = json.load(f)
+            if validate_suggestions(data):
+                # Validation errors — treat as incomplete.
+                incomplete.append(batch_file)
+                continue
+
+            # Check that every post in the batch has a result entry.
+            batch_path = os.path.join(batch_dir, batch_file)
+            with open(batch_path) as bf:
+                batch_data = json.load(bf)
+            batch_ids = {p['post_id'] for p in batch_data}
+            result_ids = {e['post_id'] for e in data}
+            if not batch_ids.issubset(result_ids):
+                incomplete.append(batch_file)
+        except (json.JSONDecodeError, OSError):
+            incomplete.append(batch_file)
+
+    return incomplete
+
+
 def aggregate_results(results_dir):
     """
     Combine per-batch result files into a single suggestions list.
@@ -146,8 +260,8 @@ def aggregate_results(results_dir):
         results_dir: Directory containing result-NNN.json files.
 
     Returns:
-        Tuple of (all_suggestions, category_counts, new_category_counts)
-        where suggestions is a list of dicts, and counts are Counters.
+        Dict with 'suggestions' (list of dicts), 'category_counts' (Counter),
+        and 'new_category_counts' (Counter).
     """
     suggestions_by_post_id = {}
     unkeyed_suggestions = []
@@ -173,7 +287,11 @@ def aggregate_results(results_dir):
         for cat in post.get('new_cats', []):
             new_cat_counts[cat] += 1
 
-    return all_suggestions, cat_counts, new_cat_counts
+    return {
+        'suggestions': all_suggestions,
+        'category_counts': cat_counts,
+        'new_category_counts': new_cat_counts,
+    }
 
 
 def validate_export(posts):
@@ -181,17 +299,16 @@ def validate_export(posts):
     Validate that an export JSON has the expected structure.
 
     Checks that each post has required fields with correct types.
-    Returns a list of error strings (empty if valid).
 
     Args:
         posts: Parsed JSON list from the export file.
 
     Returns:
-        List of validation error strings.
+        Dict with 'valid' (bool) and 'errors' (list of strings).
     """
     errors = []
     if not isinstance(posts, list):
-        return ['Export must be a JSON array']
+        return {'valid': False, 'errors': ['Export must be a JSON array']}
 
     required_fields = {
         'post_id': int,
@@ -218,13 +335,14 @@ def validate_export(posts):
                 )
 
         for field in ('categories', 'category_slugs'):
-            if isinstance(post.get(field), list) and any(not isinstance(value, str) for value in post[field]):
+            values = post.get(field)
+            if isinstance(values, list) and any(not isinstance(v, str) for v in values):
                 errors.append(
                     f'Post ID {post.get("post_id", f"index {i}")}: '
                     f'"{field}" must contain only strings'
                 )
 
-    return errors
+    return {'valid': not errors, 'errors': errors}
 
 
 def validate_suggestions(suggestions):
@@ -238,33 +356,34 @@ def validate_suggestions(suggestions):
         suggestions: Parsed JSON list from a result file.
 
     Returns:
-        List of validation error strings.
+        Dict with 'valid' (bool) and 'errors' (list of strings).
     """
     errors = []
     if not isinstance(suggestions, list):
-        return ['Suggestions must be a JSON array']
+        return {'valid': False, 'errors': ['Suggestions must be a JSON array']}
 
     for i, entry in enumerate(suggestions):
         if not isinstance(entry, dict):
             errors.append(f'Entry at index {i} is not an object')
             continue
+        label = f'Post ID {entry.get("post_id", f"index {i}")}'
         if 'post_id' not in entry:
             errors.append(f'Entry at index {i}: missing "post_id"')
         elif not isinstance(entry['post_id'], int):
             errors.append(f'Entry at index {i}: "post_id" must be int')
         if 'cats' not in entry:
-            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: missing "cats"')
+            errors.append(f'{label}: missing "cats"')
         elif not isinstance(entry['cats'], list):
-            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "cats" must be list')
+            errors.append(f'{label}: "cats" must be list')
         elif any(not isinstance(cat, str) for cat in entry['cats']):
-            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "cats" must contain only strings')
+            errors.append(f'{label}: "cats" must contain only strings')
         if 'new_cats' in entry:
             if not isinstance(entry['new_cats'], list):
-                errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "new_cats" must be list')
+                errors.append(f'{label}: "new_cats" must be list')
             elif any(not isinstance(cat, str) for cat in entry['new_cats']):
-                errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "new_cats" must contain only strings')
+                errors.append(f'{label}: "new_cats" must contain only strings')
 
-    return errors
+    return {'valid': not errors, 'errors': errors}
 
 
 def validate_backup(backup):
@@ -277,13 +396,22 @@ def validate_backup(backup):
         backup: Parsed JSON dict from a backup file.
 
     Returns:
-        List of validation error strings.
+        Dict with 'valid' (bool) and 'errors' (list of strings).
     """
     errors = []
     if not isinstance(backup, dict):
-        return ['Backup must be a JSON object']
+        return {'valid': False, 'errors': ['Backup must be a JSON object']}
 
-    for key in ('timestamp', 'site_url', 'total_posts', 'total_categories', 'default_category_slug', 'categories', 'post_categories'):
+    required_keys = (
+        'timestamp',
+        'site_url',
+        'total_posts',
+        'total_categories',
+        'default_category_slug',
+        'categories',
+        'post_categories',
+    )
+    for key in required_keys:
         if key not in backup:
             errors.append(f'Missing required key: "{key}"')
 
@@ -307,10 +435,14 @@ def validate_backup(backup):
                 for field in ('post_id', 'category_slugs'):
                     if field not in pc:
                         errors.append(f'Post mapping at index {i}: missing "{field}"')
-                if isinstance(pc.get('category_slugs'), list) and any(not isinstance(slug, str) for slug in pc['category_slugs']):
-                    errors.append(f'Post mapping at index {i}: "category_slugs" must contain only strings')
+                slugs = pc.get('category_slugs')
+                if isinstance(slugs, list) and any(not isinstance(s, str) for s in slugs):
+                    errors.append(
+                        f'Post mapping at index {i}: '
+                        f'"category_slugs" must contain only strings'
+                    )
 
-    return errors
+    return {'valid': not errors, 'errors': errors}
 
 
 def validate_result_ids(results_dir, batch_dir):
@@ -442,6 +574,12 @@ def validate_category_slugs(suggestions, valid_slugs):
     }
 
 
+def _read_tsv_dicts(log_path):
+    """Read a TSV file as a list of dicts keyed by header row."""
+    with open(log_path, newline='') as f:
+        return list(csv.DictReader(f, delimiter='\t'))
+
+
 def parse_change_log(log_path):
     """
     Parse a TSV change log file into a list of change dicts.
@@ -449,12 +587,23 @@ def parse_change_log(log_path):
     Uses csv.DictReader so quoted tabs and embedded newlines are handled the
     same way they were written by PHP's fputcsv().
 
-    Args:
-        log_path: Path to the TSV log file.
-
-    Returns:
-        List of dicts with keys: timestamp, action, post_id, post_title,
-        old_categories, new_categories, cats_added, cats_removed.
+    Returns dicts with keys: timestamp, action, post_id, post_title,
+    old_categories, new_categories, cats_added, cats_removed.
     """
-    with open(log_path, newline='') as f:
-        return list(csv.DictReader(f, delimiter='\t'))
+    return _read_tsv_dicts(log_path)
+
+
+def parse_terms_log(log_path):
+    """
+    Parse a TSV term-operation log into a list of dicts.
+
+    The terms log records create/delete/update/set-default operations on
+    categories so a later restore can replay the inverse. The wpcom adapter
+    writes one row per term operation; for UPDATE_CAT, one row per changed
+    field. DELETE_CAT rows store the full pre-delete term as JSON in
+    `old_value` so the category can be rehydrated exactly.
+
+    Returns dicts with keys: timestamp, action, term_id, slug, field,
+    old_value, new_value.
+    """
+    return _read_tsv_dicts(log_path)
