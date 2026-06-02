@@ -1229,8 +1229,8 @@ class TestRenderCategoryTree(unittest.TestCase):
         self.assertIn('Plugins (45)', result)
         self.assertIn('Themes (30)', result)
         lines = result.split('\n')
-        wp_line = [i for i, l in enumerate(lines) if 'WordPress' in l][0]
-        plugins_line = [i for i, l in enumerate(lines) if 'Plugins' in l][0]
+        wp_line = [i for i, line in enumerate(lines) if 'WordPress' in line][0]
+        plugins_line = [i for i, line in enumerate(lines) if 'Plugins' in line][0]
         self.assertGreater(plugins_line, wp_line)
 
     def test_deep_nesting(self):
@@ -1243,7 +1243,7 @@ class TestRenderCategoryTree(unittest.TestCase):
         result = render_category_tree(cats)
         self.assertIn('Level 4 (2)', result)
         lines = result.split('\n')
-        level_lines = [i for i, l in enumerate(lines) if 'Level' in l]
+        level_lines = [i for i, line in enumerate(lines) if 'Level' in line]
         self.assertEqual(len(level_lines), 4)
         child_indents = []
         for idx in level_lines[1:]:
@@ -1288,8 +1288,8 @@ class TestRenderCategoryTree(unittest.TestCase):
         result = render_category_tree(cats, actions)
         self.assertIn('Full Site Editing', result)
         lines = result.split('\n')
-        themes_line = next(i for i, l in enumerate(lines) if 'Themes' in l)
-        fse_line = next(i for i, l in enumerate(lines) if 'Full Site Editing' in l)
+        themes_line = next(i for i, line in enumerate(lines) if 'Themes' in line)
+        fse_line = next(i for i, line in enumerate(lines) if 'Full Site Editing' in line)
         self.assertGreater(fse_line, themes_line)
 
     def test_orphan_detection(self):
