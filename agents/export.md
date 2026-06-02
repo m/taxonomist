@@ -77,16 +77,22 @@ curl -H 'Authorization: Bearer TOKEN' \
   'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/categories?number=1000'
 ```
 
-Posts (max 100 per page, use `page_handle` for efficient pagination):
+Posts (max 100 per page, paginate by `offset`):
 ```bash
 # First page
 curl -H 'Authorization: Bearer TOKEN' \
-  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/posts?number=100&status=publish&fields=ID,title,content,date,categories'
+  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/posts?number=100&offset=0&status=publish&fields=ID,title,content,date,categories,URL'
 
-# Subsequent pages — use meta.next_page from previous response
+# Subsequent pages — increment offset by 100 until a page comes back empty
 curl -H 'Authorization: Bearer TOKEN' \
-  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/posts?page_handle=HANDLE'
+  'https://public-api.wordpress.com/rest/v1.1/sites/SITE_ID/posts?number=100&offset=100&status=publish&fields=ID,title,content,date,categories,URL'
 ```
+
+The v1.1 posts endpoint does not return `meta.next_page`, so a
+`page_handle` loop silently truncates to the first 100 posts. Use
+`offset` pagination and dedupe post IDs across pages (offset can repeat a
+row at a page boundary if the underlying set shifts). `WpcomAdapter.export_posts()`
+implements exactly this.
 
 Note: Categories in post responses are a hash keyed by name (`{"Tech": {"ID": 123, ...}}`), not an array. Convert them to saved `categories`, `category_ids`, and `category_slugs` fields when exporting.
 
