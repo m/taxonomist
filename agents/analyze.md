@@ -27,19 +27,20 @@ For each post, read the title, date, and full content. Based on the actual subst
 
 ## Output Format
 
-Write a JSON file with one entry per post. Use category **slugs** (not display names)
-so the apply script can resolve them unambiguously. The category list you receive
-will include both names and slugs — always output the slug.
+Write a JSON file with one entry per post. Use category **term IDs** (not display
+names or slugs) so the apply script can use the exact exported category identity.
+The category list you receive will include names, slugs, and `term_id` values —
+always output the `term_id` in `cats`.
 
 ```json
 [{
   "post_id": 123,
-  "cats": ["wordpress", "open-source"],
+  "cats": [12, 34],
   "new_cats": [],
   "confidence": "high"
 }, {
   "post_id": 456,
-  "cats": ["personal"],
+  "cats": [56],
   "new_cats": ["photography"],
   "confidence": "medium"
 }]

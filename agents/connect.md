@@ -15,18 +15,42 @@ All configuration should happen through the conversation. Ask for credentials in
 ## Steps
 
 1. Ask for the site URL if not provided
-2. **Detect the admin URL** — the site URL and wp-admin URL can differ:
-   - Try `{url}/wp-json/` first. If it works, the REST API base is at that URL.
-   - If not, try common alternatives: `{url}/blog/wp-json/`, `{url}/wordpress/wp-json/`
-   - Check the HTML of the site homepage for `<link rel="https://api.w.org/"` which reveals the actual REST API URL
-   - `curl -s {url}/ | grep -o 'https://api.w.org/[^"]*'` extracts it
-   - The REST API URL tells you where wp-admin lives (same base path)
+2. **Discover the REST API and derive all paths** — WordPress core may live at a different path than the site address (e.g., site at `example.com`, WP core at `example.com/wordpress/`). The REST API root tells us both:
+   - **Primary**: Check the HTTP `Link` header from the user's URL for the REST API base:
+     ```
+     curl -sI {url}/ | grep -i 'rel="https://api.w.org/"'
+     ```
+     This always points to the correct REST API base, regardless of directory structure.
+   - **Fallback**: If no `Link` header, try `{url}/wp-json/`.
+   - Once you have the REST API URL (`{api_url}`), fetch its root and extract the `url` and `home` fields:
+     ```
+     curl -s {api_url}/ | python3 -c "import sys,json; d=json.load(sys.stdin); print('url:', d.get('url')); print('home:', d.get('home'))"
+     ```
+     - `url` = WordPress `siteurl` (where WP core files live, e.g., `https://example.com/wordpress`)
+     - `home` = WordPress `home` (the site address visitors see, e.g., `https://example.com`)
+   - **Derive all other paths from these values:**
+     - `admin_url` = `{url}/wp-admin/` (for App Password authorization)
+     - `xmlrpc_url` = `{url}/xmlrpc.php`
+     - `site_url` for config.json = `home` (what visitors see)
+     - WP.com API domain = parsed from `home` (see step 3)
 3. Probe the site — check WordPress.com first:
-   - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` — if this returns site info, it's a WordPress.com site (hosted or Jetpack-connected). **Go straight to the WordPress.com OAuth flow.** Do NOT try password grant, Basic auth, or Application Passwords — they don't work for WordPress.com hosted sites.
-   - If not WordPress.com, check self-hosted methods:
+   - Build the WP.com API domain from the `home` value discovered in step 2. Parse out the domain and path:
+     - If `home` has no path (e.g., `https://example.com`): use `example.com`
+     - If `home` has a path (e.g., `https://example.com/subdir`): use `example.com::subdir` (replace the first `/` after the domain with `::`)
+   - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{wpcom_domain}/` — check the response:
+     - **Returns site info** (has `ID`, `name`, `URL` fields): it's a WordPress.com site (hosted or Jetpack-connected). **Go straight to the WordPress.com OAuth flow.** Do NOT try password grant, Basic auth, or Application Passwords — they don't work for WordPress.com hosted sites.
+     - **Returns `"API calls to this blog have been disabled"`**: Jetpack may be installed but the WordPress.com API is not usable. Check the self-hosted Jetpack connection endpoint to find out why:
+       ```
+       curl -s {api_url}/jetpack/v4/connection
+       ```
+       - If `hasConnectedOwner` is `true`: Jetpack is connected but the JSON API module is not active. Tell the user: *"Jetpack is installed on your site, but the JSON API module is not active so we're falling back to another authentication method."* Fall through to self-hosted methods below.
+       - If `hasConnectedOwner` is `false`: Jetpack is installed but not connected to WordPress.com. Tell the user: *"Jetpack is installed but not connected to WordPress.com, falling back to another authentication method."* Fall through to self-hosted methods below.
+       - If the endpoint returns 404: Jetpack is not installed. Fall through to self-hosted methods below.
+     - **Returns empty `{}` or connection error**: not a WordPress.com/Jetpack site. Fall through to self-hosted methods below.
+   - Self-hosted methods:
      - REST API: `curl -s {api_url}/wp/v2/categories | head -c 200`
      - If user mentions SSH: `ssh {user}@{host} "which wp"`
-     - XML-RPC (last resort): `curl -s {url}/xmlrpc.php`
+     - XML-RPC (last resort): `curl -s {xmlrpc_url}`
 4. Based on what's available, recommend the best method:
    - WordPress.com sites → WordPress.com OAuth (always)
    - Self-hosted with SSH → WP-CLI over SSH
@@ -38,7 +62,12 @@ All configuration should happen through the conversation. Ask for credentials in
    - Save credentials to config.json — it's gitignored so it never gets committed
    - Never show credentials in curl output — read from config.json
 6. Test the connection by listing categories
-7. Write config.json with everything needed to reconnect without re-authenticating:
+7. **Verify capabilities (HARD GATE)** — before writing config.json or proceeding to export, confirm the authenticated account has the capability Taxonomist actually needs. See the "Capability Verification" section below for the exact probe per method. If the account lacks `manage_categories`:
+   - Tell the user explicitly which role was detected (e.g., "Contributor") and which capability is missing.
+   - Offer three choices via `AskUserQuestion`: (a) re-authenticate with a higher-privilege account, (b) abort, or (c) continue in read-only mode (dry-run plan only, no apply).
+   - If the user picks (c), set `"read_only": true` in config.json so downstream steps know to stop at the plan.
+   - Do NOT silently fall through. Running the analyze step against a contributor-level token wastes tokens and time.
+8. Write config.json with everything needed to reconnect without re-authenticating:
    ```json
    {
      "site_url": "https://example.com",
@@ -46,7 +75,7 @@ All configuration should happen through the conversation. Ask for credentials in
        "method": "rest-api",
        "api_url": "https://example.com/wp-json",
        "username": "admin",
-       "app_password": "xxxx xxxx xxxx xxxx"
+       "app_password": "xxxx xxxx xxxx xxxx xxxx xxxx"
      }
    }
    ```
@@ -83,30 +112,63 @@ Test: `wp --path={wp_path} option get blogname`
 
 ### REST API + Application Password
 
-For **self-hosted WordPress** sites (WordPress 5.6+). Uses the browser-based authorize-application flow — same frictionless experience as the WordPress.com OAuth flow.
+For **self-hosted WordPress** sites running WordPress 5.6 or newer with [Application Passwords](https://make.wordpress.org/core/2020/11/05/application-passwords-integration-guide/) enabled.
 
-**IMPORTANT:** The authorize URL uses wp-admin, which may be at a different path than the site URL. Detect the correct admin URL first (see step 2 above).
+**IMPORTANT:** The authorize URL uses wp-admin, which may be at a different path than the site address. Always use the `admin_url` derived in step 2 (based on the REST API `url` field, not `home`). For example, if the site is at `example.com` but WP core is at `example.com/wordpress/`, wp-admin is at `example.com/wordpress/wp-admin/`.
 
-**Automated flow (preferred):**
+This connection method has two flows. **Pick the right one based on the site's WordPress version**, because WordPress 7.0+ unlocks a frictionless one-click flow that older versions cannot use:
 
-1. Start a local HTTP server on port 19823 to capture the callback
+#### Step 1 — Detect the WordPress version
+
+Try these signals in order, stop at the first one that yields a parseable `MAJOR.MINOR.PATCH` string:
+
+1. **Asset query strings on the homepage HTML.** Run `curl -s {site_url}/ | grep -oE 'ver=[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -u` and pick the most common value. WordPress core stylesheets and scripts are loaded with `?ver={core_version}` by default.
+2. **`/feed/` generator element.** Run `curl -s {site_url}/feed/ | grep -oE '<generator>[^<]+</generator>'`. The text usually looks like `https://wordpress.org/?v=6.9.4`.
+3. **`/readme.html`.** Run `curl -s {site_url}/readme.html | grep -oE 'Version [0-9]+\.[0-9]+(\.[0-9]+)?'`. Often deleted on hardened installs.
+4. **`<meta name="generator">` on the homepage.** Often stripped on production sites, so this is the last resort.
+
+If none of those yields a version (hardened sites strip all of them), treat the site as **older than 7.0** and use the manual flow below. That's the universally-safe fallback.
+
+#### Step 2A — WordPress 7.0 or newer: automated loopback flow
+
+This is the preferred path because the user only has to click "Approve" once — no copying or pasting.
+
+1. Start a local HTTP server bound to **`127.0.0.1:19823`** to capture the callback. The agent should write a small Python or Node one-shot server that handles a single GET, parses `user_login` and `password` from the query string, and exits. `0.0.0.0` is acceptable but `127.0.0.1` is safer (loopback only).
 2. Open the user's browser to the authorize URL:
    ```
-   {admin_url}/authorize-application.php?app_name=Taxonomist&success_url=http://localhost:19823/
+   {admin_url}/authorize-application.php?app_name=Taxonomist&success_url=http://127.0.0.1:19823/
    ```
-3. User logs into wp-admin (if needed) and clicks "Yes, I approve of this connection"
-4. WordPress redirects to `http://localhost:19823/?user_login=USERNAME&password=xxxx+xxxx+xxxx+xxxx`
-5. Local server captures the username and app password from the URL parameters
-6. Save to config.json and test
+   Use `open` (macOS), `xdg-open` (Linux), or `start "" "{url}"` (Windows — the empty `""` is required when the URL is quoted).
+3. The user logs into wp-admin if prompted, then clicks **"Yes, I approve of this connection"**.
+4. WordPress redirects the browser to `http://127.0.0.1:19823/?user_login=USERNAME&password=xxxx%20xxxx%20xxxx%20xxxx%20xxxx%20xxxx`. The local server captures both values. The password arrives URL-encoded — spaces can come through as either `%20` or `+` depending on the WordPress version, so URL-decode before saving (Python's `urllib.parse.parse_qs` handles both).
+5. Save to config.json (see schema below) and verify with the test in Step 3.
 
-The `success_url` MUST include the trailing slash. URL-decode the password (spaces come as `+`).
+**Use the literal string `127.0.0.1`, not `localhost`.** WordPress 7.0+ whitelists only the loopback IP literals `127.0.0.1` and `[::1]` (per RFC 8252 §7.3); the hostname `localhost` is intentionally excluded by RFC 8252 §8.3 to avoid DNS resolution and firewall interception risks. A `success_url` of `http://localhost:19823/` is rejected with the same error as any other non-HTTPS URL.
 
-**Fallback:** If the automated flow fails, ask the user to:
-1. Go to **Users → Profile** in wp-admin
-2. Scroll to "Application Passwords", enter "Taxonomist", click "Add New"
-3. Paste the generated password in the chat
+#### Step 2B — WordPress older than 7.0 (or version unknown): no-redirect manual flow
 
-Save everything to config.json (gitignored):
+WordPress versions before 7.0 reject any `http://` `success_url` (unless `WP_ENVIRONMENT_TYPE=local`), so the loopback flow above will fail with *"The URL must be served over a secure connection."* at the Approve step. Instead, use the no-redirect mode of `authorize-application.php` — when no `success_url` is provided, WordPress renders the generated password inline on the wp-admin success page in a readonly text field.
+
+1. Open the user's browser to the authorize URL — **do not include a `success_url` parameter**:
+   ```
+   {admin_url}/authorize-application.php?app_name=Taxonomist
+   ```
+2. The user logs into wp-admin if prompted, then clicks **"Yes, I approve of this connection"**.
+3. WordPress renders the success page with the generated Application Password displayed in a readonly `<input>` field, chunked as `xxxx xxxx xxxx xxxx xxxx xxxx` (24 characters in 6 groups of 4).
+4. Ask the user to paste back **two things**: their WordPress username and the displayed password. Format the prompt clearly:
+   ```
+   username: their-login-username (NOT the display name or email)
+   password: xxxx xxxx xxxx xxxx xxxx xxxx
+   ```
+   The username confusion is a common source of 401s — be explicit that it must be the login slug, not the friendly name.
+5. Save to config.json (see schema below) and verify with the test in Step 3.
+
+**Security note:** This flow requires the user to paste the Application Password into the chat transcript, which means the credential ends up wherever chat history is stored or synced. The automated flow (Step 2A) avoids this because the credential travels directly from the browser to a local socket. If the user is concerned, remind them that Application Passwords can be revoked from **Users → Profile** at any time, and that creating a fresh one for each session is cheap.
+
+#### Step 3 — Save and verify
+
+The config.json schema is the same regardless of which flow ran:
+
 ```json
 {
   "site_url": "https://example.com",
@@ -114,11 +176,42 @@ Save everything to config.json (gitignored):
     "method": "rest-api",
     "api_url": "https://example.com/wp-json",
     "username": "admin",
-    "app_password": "xxxx xxxx xxxx xxxx"
+    "app_password": "xxxx xxxx xxxx xxxx xxxx xxxx"
   }
 }
 ```
-Test by reading credentials from config: `python3 -c "import json; c=json.load(open('config.json'))['connection']; print(c['username'], c['app_password'])"` then use in curl.
+
+Verify the credentials by hitting `/wp-json/wp/v2/users/me?context=edit` with HTTP Basic auth and confirming the response carries the expected user with `edit_posts` and `manage_categories` capabilities. Read the credentials from disk so they don't end up in shell history:
+
+```bash
+python3 -c "
+import json, base64, urllib.request
+c = json.load(open('config.json'))['connection']
+t = base64.b64encode(f\"{c['username']}:{c['app_password']}\".encode()).decode()
+r = urllib.request.urlopen(urllib.request.Request(
+    f\"{c['api_url']}/wp/v2/users/me?context=edit\",
+    headers={'Authorization': f'Basic {t}'}))
+me = json.load(r)
+print('OK:', me['username'], me['roles'], 'edit_posts:', me['capabilities'].get('edit_posts'))
+"
+```
+
+If the verification 401s, the most likely cause is that the user pasted their display name or email instead of their `user_login` slug — ask them to check the **Username** field (not "Name") at `{admin_url}/profile.php`.
+
+#### Failure modes you should anticipate
+
+- **`authorize-application.php` returns "Application passwords are not available."** — The site has Application Passwords disabled site-wide via the `wp_is_application_passwords_available` filter (some hardened/managed hosts do this). There is no programmatic recovery; the user has to enable it server-side or use a different connection method (WP-CLI over SSH if available, or XML-RPC as a last resort).
+- **`authorize-application.php` returns "Application passwords are not available for your account."** — The user's account doesn't have permission. They need an admin to grant it, or they need to log in as an admin user.
+- **`authorize-application.php` returns "This site is protected by HTTP Basic Auth"** — The whole wp-admin is behind a separate auth layer. The user has to authenticate through the basic-auth dialog first; the agent can't proxy this.
+- In all three cases, the agent should explain the failure to the user and offer to fall back to the manual `Users → Profile` path described below.
+
+#### Manual fallback — generate the App Password by hand
+
+If `authorize-application.php` is unreachable (404, blocked, or any of the failure modes above), ask the user to do it manually:
+
+1. Go to **Users → Profile** in wp-admin (`{admin_url}/profile.php`)
+2. Scroll to "Application Passwords", enter `Taxonomist`, click "Add New Application Password"
+3. Copy the generated password and paste it back here along with the WordPress username
 
 ### REST API + JWT
 ```json
@@ -144,7 +237,7 @@ Test by reading credentials from config: `python3 -c "import json; c=json.load(o
   }
 }
 ```
-Test: `curl -s -d '<?xml version="1.0"?><methodCall><methodName>wp.getCategories</methodName><params><param><value>1</value></param><param><value>{user}</value></param><param><value>{pass}</value></param></params></methodCall>' {url}/xmlrpc.php`
+Test: `curl -s -d '<?xml version="1.0"?><methodCall><methodName>wp.getCategories</methodName><params><param><value>1</value></param><param><value>{user}</value></param><param><value>{pass}</value></param></params></methodCall>' {xmlrpc_url}`
 
 ### WordPress.com / Jetpack API
 
@@ -155,8 +248,8 @@ Taxonomist is registered as a WordPress.com OAuth2 app. Users do NOT need to reg
 - Client Secret: not required (WordPress.com treats it as optional for native apps)
 
 **Detection:** Check if the site is on WordPress.com (`*.wordpress.com`) or has Jetpack:
-- `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` (returns site info if accessible)
-- `curl -s {url}/wp-json/jetpack/v4/module` (Jetpack present on self-hosted)
+- `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{wpcom_domain}/` (returns site info if accessible; use `domain::path` syntax for subdirectory sites — see step 3)
+- `curl -s {api_url}/jetpack/v4/module` (Jetpack present on self-hosted)
 
 **Getting a token (use the provided auth script):**
 
@@ -182,17 +275,75 @@ Save token to config.json (gitignored):
 }
 ```
 
-**Site ID:** Captured automatically from the probe in step 3 — the `ID` field in the response from `https://public-api.wordpress.com/rest/v1.1/sites/{domain}/`. You can also use the domain string (e.g., `example.wordpress.com`) but the numeric ID is more reliable.
+**Site ID:** Captured automatically from the probe in step 3 — the `ID` field in the response from `https://public-api.wordpress.com/rest/v1.1/sites/{wpcom_domain}/`. You can also use the domain string (e.g., `example.wordpress.com`) but the numeric ID is more reliable.
 
 **Scopes:** The token has global scope and works for any site the user has access to.
 
 Test by reading token from config and curling the API.
 
+## Capability Verification
+
+Taxonomist needs to create, update, and delete categories. That requires `manage_categories`. In WordPress role terms, this is **Editor** or **Administrator**. Contributor and Author roles cannot complete an apply.
+
+Run the probe that matches the connection method. If the probe indicates the account lacks `manage_categories`, STOP and apply the gate described in step 7.
+
+### WordPress.com / Jetpack API
+
+`GET /rest/v1.1/sites/$site` returns the site info including a `capabilities` object scoped to the authenticated user for that site.
+
+```bash
+TOKEN=$(python3 -c "import json; print(json.load(open('config.json'))['connection']['access_token'])")
+SITE=$(python3 -c "import json; print(json.load(open('config.json'))['connection']['site_id'])")
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://public-api.wordpress.com/rest/v1.1/sites/$SITE?fields=ID,URL,capabilities" \
+  | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+caps = data.get('capabilities', {})
+if not caps.get('manage_categories'):
+    print('MISSING: manage_categories')
+    sys.exit(1)
+print('OK: manage_categories verified')
+"
+```
+
+If the user has Contributor access, `manage_categories` will be `false` even though the token can read categories.
+
+### REST API + Application Password / JWT
+
+Fetch `/wp-json/wp/v2/users/me?context=edit` with the credentials. The `capabilities` field lists every capability the account has.
+
+```bash
+curl -s -u "$USER:$APP_PASSWORD" "$API_URL/wp/v2/users/me?context=edit" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+if not data.get('capabilities', {}).get('manage_categories'):
+    print('MISSING: manage_categories')
+    sys.exit(1)
+print(f'OK: role={list(data.get(\"roles\", []))}, manage_categories verified')
+"
+```
+
+If the endpoint returns 401/403, the token lacks even `edit` context and definitely cannot apply changes.
+
+### WP-CLI (SSH or local)
+
+```bash
+# Replace {USER} with the account whose credentials WP-CLI will run as (usually the SSH user's mapped WP user, or --user= in wp_cli_flags).
+wp cap list "$USER" | grep -Fx manage_categories
+```
+
+If the grep prints nothing, the capability is missing.
+
+### XML-RPC
+
+XML-RPC does not expose granular capabilities. Use `wp.getUsersBlogs` + `wp.getProfile` to read the role string; assume any role below Editor is insufficient and warn the user.
+
 ## Important
 
 - config.json is gitignored — credentials stay local, never committed
 - Test the connection before finalizing config
-- Verify write access (not just read) by checking if the user has edit_posts capability
+- **The capability probe is a hard gate, not a nice-to-have.** Running Export and Analyze burns tokens. Never run them against a site without first confirming the account can actually apply the result.
 - Connection method preference: WP-CLI SSH > WP-CLI local > WordPress.com API > REST API + App Password > REST API + JWT > XML-RPC
 - For WordPress.com hosted sites, the WordPress.com API is the natural choice
 - For self-hosted sites with Jetpack, offer the WordPress.com API as an option alongside direct REST API

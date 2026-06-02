@@ -3,11 +3,16 @@ Tests for the WordPress.com API adapter.
 
 Uses unittest.mock to patch urllib.request.urlopen so no real HTTP
 requests are made. Verifies issue #1-4 defenses and API interactions.
+
+The restore/logging tests use FakeWpcom, a subclass that overrides
+_request() with an in-memory category/post store so the restore logic
+can be exercised end-to-end without complex mock response choreography.
 """
 
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -15,8 +20,18 @@ import urllib.error
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
-from adapters.wpcom_adapter import WpcomAdapter, WpcomApiError, wp_urlencode
-
+from adapters.wpcom_adapter import (
+    ACTION_CREATE_CAT,
+    ACTION_DELETE_CAT,
+    ACTION_SET_CATS,
+    ACTION_SET_DEFAULT,
+    MODE_LOGS,
+    MODE_SNAPSHOT,
+    PartialRestoreError,
+    WpcomAdapter,
+    WpcomApiError,
+    wp_urlencode,
+)
 
 VALID_CONFIG = {
     'site_url': 'https://example.wordpress.com',
@@ -81,13 +96,41 @@ class TestWpcomAdapterInit(unittest.TestCase):
             WpcomAdapter(config)
         self.assertIn('site_id', str(ctx.exception))
 
-    def test_missing_access_token(self):
+    def test_init_without_token(self):
         config = {**VALID_CONFIG, 'connection': {
             'method': 'wpcom-api', 'site_id': '1',
         }}
-        with self.assertRaises(ValueError) as ctx:
-            WpcomAdapter(config)
-        self.assertIn('access_token', str(ctx.exception))
+        adapter = WpcomAdapter(config)
+        self.assertIsNone(adapter.access_token)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_read_without_token(self, mock_urlopen):
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '1',
+        }}
+        adapter = WpcomAdapter(config)
+        mock_urlopen.return_value = _mock_response({'categories': [], 'found': 0})
+        adapter.list_categories()
+        req = mock_urlopen.call_args[0][0]
+        self.assertFalse(req.has_header('Authorization'))
+
+    def test_write_without_token_raises(self):
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '1',
+        }}
+        adapter = WpcomAdapter(config)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.create_category('Test', 'test')
+        self.assertEqual(ctx.exception.error, 'auth_required')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_read_with_token_sends_auth(self, mock_urlopen):
+        adapter = WpcomAdapter(VALID_CONFIG)
+        mock_urlopen.return_value = _mock_response({'categories': [], 'found': 0})
+        adapter.list_categories()
+        req = mock_urlopen.call_args[0][0]
+        self.assertTrue(req.has_header('Authorization'))
+        self.assertIn('test-token-xxx', req.get_header('Authorization'))
 
 
 class TestListCategories(unittest.TestCase):
@@ -160,6 +203,29 @@ class TestDeleteCategory(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 404)
 
 
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_uses_v2_for_duplicate_slugs_delete(self, mock_urlopen):
+        """Falls back to wp/v2 DELETE when slug is not unique."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            _mock_response({'deleted': True}),  # wp/v2 delete
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.delete_category(42)
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+        v2_call = mock_urlopen.call_args_list[1]
+        req = v2_call[0][0]
+        self.assertIn('/wp/v2/', req.full_url)
+        self.assertIn('/categories/42', req.full_url)
+        self.assertIn('force=true', req.full_url)
+        self.assertEqual(req.get_method(), 'DELETE')
+
+
 class TestUpdateCategory(unittest.TestCase):
     """Tests for category updates (issue #3 defenses)."""
 
@@ -220,30 +286,196 @@ class TestUpdateCategory(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertIn('duplicate', ctx.exception.error)
 
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_uses_v2_for_duplicate_slugs(self, mock_urlopen):
+        """Falls back to wp/v2 when slug is not unique."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            _mock_response({'id': 42, 'slug': 'reviews'}),  # wp/v2 update
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(mock_urlopen.call_count, 2)
 
-class TestSetPostCategories(unittest.TestCase):
-    """Tests for setting post categories."""
+        # The second call should be to wp/v2, not v1.1.
+        v2_call = mock_urlopen.call_args_list[1]
+        req = v2_call[0][0]
+        self.assertIn('/wp/v2/', req.full_url)
+        self.assertIn('/categories/42', req.full_url)
+        # wp/v2 uses JSON, not form-encoded.
+        self.assertEqual(req.get_header('Content-type'), 'application/json')
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
-    def test_resolves_ids_to_names(self, mock_urlopen):
+    def test_uses_v1_for_unique_slugs(self, mock_urlopen):
+        """Uses v1.1 slug-based endpoint when no duplicate slugs."""
+        cat = {'ID': 42, 'name': 'Tech', 'slug': 'tech', 'parent': 0}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),  # cache
+            _mock_response({'found': 1}),  # pre-count
+            _mock_response({'ID': 42, 'slug': 'tech'}),  # v1.1 update
+            _mock_response({'found': 1}),  # post-count
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(mock_urlopen.call_count, 4)
+
+        update_call = mock_urlopen.call_args_list[2]
+        req = update_call[0][0]
+        self.assertIn('/v1.1/', req.full_url)
+        self.assertIn('slug:tech', req.full_url)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_v2_http_error(self, mock_urlopen):
+        """wp/v2 path raises WpcomApiError on HTTP errors."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        error_body = json.dumps({'code': 'term_not_found', 'message': 'Not found'}).encode()
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            urllib.error.HTTPError(None, 404, 'Not Found', {}, io.BytesIO(error_body)),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(ctx.exception.status_code, 404)
+        self.assertEqual(ctx.exception.error, 'term_not_found')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_v2_invalid_json_response(self, mock_urlopen):
+        """wp/v2 path raises WpcomApiError on non-JSON success response."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        html_resp = MagicMock()
+        html_resp.status = 200
+        html_resp.read.return_value = b'<html>Maintenance</html>'
+        html_resp.__enter__ = lambda s: s
+        html_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            html_resp,
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(ctx.exception.error, 'invalid_json')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_v2_connection_error(self, mock_urlopen):
+        """wp/v2 path raises WpcomApiError on connection failure."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            urllib.error.URLError('Name resolution failed'),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(ctx.exception.error, 'connection_error')
+        self.assertIn('wp/v2', str(ctx.exception))
+
+    def test_has_duplicate_slugs(self):
+        """Detects when multiple categories share a slug."""
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter._category_cache = [
+            {'ID': 1, 'slug': 'reviews', 'parent': 0},
+            {'ID': 2, 'slug': 'reviews', 'parent': 5},
+            {'ID': 3, 'slug': 'tech', 'parent': 0},
+        ]
+        self.assertTrue(adapter._has_duplicate_slugs('reviews'))
+        self.assertFalse(adapter._has_duplicate_slugs('tech'))
+        self.assertFalse(adapter._has_duplicate_slugs('nonexistent'))
+
+
+class TestSetPostCategories(unittest.TestCase):
+    """Tests for setting post categories.
+
+    The adapter uses v1.2 + `categories_by_id` to avoid the v1.1
+    silent-failure modes documented in PR #10: numeric category
+    names get auto-interpreted as term IDs and silently dropped,
+    and v1.2 + name-based `categories` creates junk categories
+    literally named after the numeric value. The only safe shape
+    is v1.2 + integer IDs.
+    """
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_posts_categories_by_id_to_v1_2(self, mock_urlopen):
+        """Verify the request shape: v1.2 URL + JSON body + integer IDs."""
         cats = [
             {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
             {'ID': 2, 'name': 'AI', 'slug': 'ai', 'parent': 0},
         ]
         mock_urlopen.side_effect = [
             _mock_response({'found': 2, 'categories': cats}),
-            _mock_response({'ID': 100}),  # post update
+            # Post update response with matching categories so drift
+            # detection passes.
+            _mock_response({
+                'ID': 100,
+                'terms': {'category': {
+                    'tech': {'ID': 1, 'slug': 'tech'},
+                    'ai': {'ID': 2, 'slug': 'ai'},
+                }},
+            }),
         ]
         adapter = WpcomAdapter(VALID_CONFIG)
         adapter.set_post_categories(100, [1, 2])
 
         post_call = mock_urlopen.call_args_list[1]
-        body = post_call[0][0].data.decode('utf-8')
-        # Should send comma-separated names, not IDs.
-        self.assertIn('categories=Tech', body)
+        req = post_call[0][0]
+        # Target URL must be v1.2, not v1.1.
+        self.assertIn('/rest/v1.2/', req.full_url)
+        # Body must be JSON with categories_by_id as an integer list.
+        body = json.loads(req.data.decode('utf-8'))
+        self.assertEqual(body, {'categories_by_id': [1, 2]})
+        # Content-Type must announce JSON.
+        self.assertEqual(req.get_header('Content-type'), 'application/json')
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
-    def test_unknown_id_raises(self, mock_urlopen):
+    def test_numeric_category_name_is_not_dropped(self, mock_urlopen):
+        """Regression: category named '24' must survive the round trip.
+
+        The v1.1 + form-encoded `categories` shape silently dropped
+        numeric names because WP.com auto-interpreted them as term
+        IDs. The v1.2 + `categories_by_id` shape sends the term ID
+        directly, so the name's textual content is irrelevant.
+        """
+        cats = [
+            {'ID': 23586, 'name': '24', 'slug': '24', 'parent': 0},
+            {'ID': 1030, 'name': 'Action', 'slug': 'action', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),
+            _mock_response({
+                'ID': 100,
+                'terms': {'category': {
+                    '24': {'ID': 23586, 'slug': '24'},
+                    'action': {'ID': 1030, 'slug': 'action'},
+                }},
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        # Must not raise.
+        adapter.set_post_categories(100, [23586, 1030])
+
+        post_call = mock_urlopen.call_args_list[1]
+        body = json.loads(post_call[0][0].data.decode('utf-8'))
+        # Both IDs must be in the payload — 23586 (for the "24" cat)
+        # and 1030 (for "Action"). Neither should be stringified.
+        self.assertEqual(body['categories_by_id'], [23586, 1030])
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_unknown_id_raises_before_posting(self, mock_urlopen):
+        """Pre-flight check: unknown IDs must be caught locally."""
         mock_urlopen.return_value = _mock_response({
             'found': 0, 'categories': [],
         })
@@ -251,6 +483,57 @@ class TestSetPostCategories(unittest.TestCase):
         with self.assertRaises(WpcomApiError) as ctx:
             adapter.set_post_categories(100, [999])
         self.assertEqual(ctx.exception.status_code, 404)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_raises_on_silent_drop_from_api(self, mock_urlopen):
+        """If the API returns fewer categories than we sent, raise.
+
+        `categories_by_id` is documented (PR #10) to silently drop
+        stale or unknown IDs with no error and HTTP 200. The only
+        reliable check is a read-back of the response against what
+        we sent, which must raise if they don't match.
+        """
+        cats = [
+            {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
+            {'ID': 2, 'name': 'AI', 'slug': 'ai', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),
+            # API returned only category 1; category 2 was silently
+            # dropped. The adapter must surface this as an error.
+            _mock_response({
+                'ID': 100,
+                'terms': {'category': {
+                    'tech': {'ID': 1, 'slug': 'tech'},
+                }},
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.set_post_categories(100, [1, 2])
+        self.assertEqual(ctx.exception.error, 'categories_drift')
+        self.assertIn('dropped=[2]', str(ctx.exception))
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_accepts_legacy_categories_response_shape(self, mock_urlopen):
+        """Fallback: some responses key category info under `categories`
+        (name-keyed hash) instead of `terms.category` (slug-keyed)."""
+        cats = [
+            {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': cats}),
+            _mock_response({
+                'ID': 100,
+                'categories': {
+                    'Tech': {'ID': 1, 'slug': 'tech'},
+                },
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        # Must not raise — drift detection should find the match in
+        # the legacy shape.
+        adapter.set_post_categories(100, [1])
 
 
 class TestExportPosts(unittest.TestCase):
@@ -334,6 +617,7 @@ class TestErrorHandling(unittest.TestCase):
         with self.assertRaises(WpcomApiError) as ctx:
             adapter.list_categories()
         self.assertEqual(ctx.exception.status_code, 500)
+        error.close()
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
     def test_connection_error_raised(self, mock_urlopen):
@@ -383,7 +667,14 @@ class TestGetDefaultCategory(unittest.TestCase):
 
 
 class TestBackup(unittest.TestCase):
-    """Tests for full taxonomy backup."""
+    """Tests for full taxonomy backup.
+
+    The posts fetch uses offset pagination because WP.com v1.1 does
+    not return `meta.next_page` for the posts endpoint. The older
+    page_handle-based loop silently stopped after 100 posts on every
+    site — verified empirically on a real 766-post site where the
+    generated backup had `total_posts: 100`.
+    """
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
     def test_writes_backup_json(self, mock_urlopen):
@@ -396,8 +687,10 @@ class TestBackup(unittest.TestCase):
         mock_urlopen.side_effect = [
             # list_categories
             _mock_response({'found': 1, 'categories': [cat]}),
-            # posts pagination
-            _mock_response({'found': 1, 'posts': [post], 'meta': {}}),
+            # posts offset=0 — one post
+            _mock_response({'found': 1, 'posts': [post]}),
+            # posts offset=100 — empty, loop exits
+            _mock_response({'found': 1, 'posts': []}),
             # get_default_category -> settings
             _mock_response({'default_category': 1}),
             # get_default_category -> category cache
@@ -418,6 +711,814 @@ class TestBackup(unittest.TestCase):
             self.assertEqual(backup['post_categories'][0]['post_id'], 100)
         finally:
             os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_paginates_through_multiple_pages(self, mock_urlopen):
+        """Regression: every post beyond the first page must be captured.
+
+        The previous page_handle-based loop read `meta.next_page`
+        which WP.com v1.1 does not return, so the backup silently
+        truncated at 100 posts. This test builds a 250-post response
+        and asserts all 250 end up in the backup.
+        """
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': '', 'post_count': 250}
+
+        def _page(start, count):
+            return [
+                {
+                    'ID': start + i,
+                    'title': f'Post {start + i}',
+                    'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+                }
+                for i in range(count)
+            ]
+
+        mock_urlopen.side_effect = [
+            # list_categories
+            _mock_response({'found': 1, 'categories': [cat]}),
+            # posts offset=0 — 100 posts
+            _mock_response({'found': 250, 'posts': _page(1, 100)}),
+            # posts offset=100 — 100 posts
+            _mock_response({'found': 250, 'posts': _page(101, 100)}),
+            # posts offset=200 — 50 posts
+            _mock_response({'found': 250, 'posts': _page(201, 50)}),
+            # posts offset=300 — empty, loop exits
+            _mock_response({'found': 250, 'posts': []}),
+            # get_default_category -> settings
+            _mock_response({'default_category': 1}),
+            # get_default_category -> category cache
+            _mock_response({'found': 1, 'categories': [cat]}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            with open(output_path) as f:
+                backup = json.load(f)
+            self.assertEqual(backup['total_posts'], 250)
+            ids = [p['post_id'] for p in backup['post_categories']]
+            self.assertEqual(ids, list(range(1, 251)))
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_backup_without_token_skips_default_category(self, mock_urlopen):
+        """Read-only backup must succeed when /settings returns 403.
+
+        The WordPress.com /sites/{id}/settings endpoint requires auth
+        even on public sites. A token-less backup should still work and
+        record default_category_slug as an empty string rather than
+        propagating the 403.
+        """
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': 'Technology', 'post_count': 5}
+        post = {
+            'ID': 100, 'title': 'Test',
+            'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+        }
+        forbidden = urllib.error.HTTPError(
+            'https://public-api.wordpress.com/rest/v1.1/sites/12345/settings',
+            403, 'Forbidden', {},
+            io.BytesIO(json.dumps({
+                'error': 'unauthorized',
+                'message': 'This endpoint does not allow unauthorized access.',
+            }).encode('utf-8')),
+        )
+        mock_urlopen.side_effect = [
+            # list_categories
+            _mock_response({'found': 1, 'categories': [cat]}),
+            # posts offset=0 — one post
+            _mock_response({'found': 1, 'posts': [post], 'meta': {}}),
+            # posts offset=100 — empty, loop exits
+            _mock_response({'found': 1, 'posts': [], 'meta': {}}),
+            # get_default_category -> settings (403, no token)
+            forbidden,
+        ]
+        config = {**VALID_CONFIG, 'connection': {
+            'method': 'wpcom-api', 'site_id': '12345',
+        }}
+        adapter = WpcomAdapter(config)
+        self.assertIsNone(adapter.access_token)
+
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            with open(output_path) as f:
+                backup = json.load(f)
+            self.assertEqual(backup['default_category_slug'], '')
+            self.assertEqual(backup['total_posts'], 1)
+            self.assertEqual(backup['total_categories'], 1)
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_sends_offset_not_page_handle(self, mock_urlopen):
+        """The posts query must use `offset`, not `page_handle`."""
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': '', 'post_count': 0}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),
+            _mock_response({'found': 0, 'posts': []}),
+            _mock_response({'default_category': 1}),
+            _mock_response({'found': 1, 'categories': [cat]}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            # Second call is the first posts page.
+            posts_url = mock_urlopen.call_args_list[1][0][0].full_url
+            self.assertIn('offset=0', posts_url)
+            self.assertNotIn('page_handle', posts_url)
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_dedupes_across_page_boundaries(self, mock_urlopen):
+        """Offset pagination can return the same post twice if the
+        underlying query shifts (e.g., a new post is published between
+        pages). The loop must dedupe and still terminate."""
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': '', 'post_count': 3}
+
+        def _post(pid):
+            return {
+                'ID': pid,
+                'title': f'Post {pid}',
+                'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+            }
+
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),
+            # offset=0 — posts 1, 2, 3
+            _mock_response({'found': 3, 'posts': [_post(1), _post(2), _post(3)]}),
+            # offset=100 — same posts again (simulates shifted query).
+            # No new IDs, loop must exit rather than spin forever.
+            _mock_response({'found': 3, 'posts': [_post(1), _post(2), _post(3)]}),
+            _mock_response({'default_category': 1}),
+            _mock_response({'found': 1, 'categories': [cat]}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            with open(output_path) as f:
+                backup = json.load(f)
+            # Each post appears exactly once.
+            ids = [p['post_id'] for p in backup['post_categories']]
+            self.assertEqual(sorted(ids), [1, 2, 3])
+            self.assertEqual(backup['total_posts'], 3)
+        finally:
+            os.unlink(output_path)
+
+
+# --- FakeWpcom for restore/logging tests ---
+
+class FakeWpcom(WpcomAdapter):
+    """In-memory WP.com adapter for testing restore/logging logic."""
+
+    def __init__(self, cats=None, posts=None, default_id=1):
+        super().__init__(VALID_CONFIG)
+        self.cats = dict(cats or {})
+        self.posts = dict(posts or {})
+        self.default_id = default_id
+        self.next_id = max(
+            list(self.cats.keys()) + list(self.posts.keys()) + [0]
+        ) + 100
+        self._category_cache = list(self.cats.values())
+
+    def list_categories(self):
+        self._category_cache = list(self.cats.values())
+        return self._category_cache
+
+    def _get_category_count(self):
+        return len(self.cats)
+
+    def _request(self, method, path, data=None, params=None,
+                 override_url=None, json_body=None):
+        # v1.2 + categories_by_id path used by set_post_categories.
+        # The real adapter routes through override_url; recognize the
+        # post-update shape here and apply IDs directly.
+        if override_url and json_body and 'categories_by_id' in json_body:
+            pid = int(override_url.rstrip('/').split('/posts/')[1])
+            ids = [int(cid) for cid in json_body['categories_by_id']]
+            cat_hash = {}
+            for cid in ids:
+                cat = self.cats.get(cid)
+                if cat is not None:
+                    cat_hash[cat['name']] = cat
+            self.posts[pid]['categories'] = cat_hash
+            return {
+                'ID': pid,
+                'terms': {
+                    'category': {
+                        c['name']: {'ID': c['ID'], 'name': c['name'],
+                                    'slug': c['slug']}
+                        for c in cat_hash.values()
+                    },
+                },
+            }
+        if path.endswith('/categories'):
+            return {
+                'categories': list(self.cats.values()),
+                'found': len(self.cats),
+            }
+        if path.endswith('/categories/new'):
+            tid = self.next_id
+            self.next_id += 1
+            cat = {
+                'ID': tid, 'name': data.get('name', ''),
+                'slug': data.get('slug') or '',
+                'description': data.get('description', ''),
+                'parent': int(data.get('parent', 0) or 0),
+                'post_count': 0,
+            }
+            self.cats[tid] = cat
+            return cat
+        if '/categories/slug:' in path and path.endswith('/delete'):
+            slug = path.split('/categories/slug:')[1].split('/')[0]
+            for tid, c in list(self.cats.items()):
+                if c['slug'] == slug:
+                    del self.cats[tid]
+                    return {'success': True}
+            raise WpcomApiError(404, 'not_found', slug)
+        if '/categories/slug:' in path:
+            slug = path.split('/categories/slug:')[1]
+            for c in self.cats.values():
+                if c['slug'] == slug:
+                    for k, v in (data or {}).items():
+                        if k == 'parent':
+                            v = int(v or 0)
+                        c[k] = v
+                    return c
+            raise WpcomApiError(404, 'not_found', slug)
+        if path.endswith('/posts'):
+            return {
+                'posts': [
+                    {'ID': p['ID'], 'title': p.get('title', ''),
+                     'categories': p.get('categories', {})}
+                    for p in self.posts.values()
+                ],
+                'meta': {},
+            }
+        if '/posts/' in path and method == 'POST':
+            pid = int(path.split('/posts/')[1])
+            names = [
+                n.strip()
+                for n in (data or {}).get('categories', '').split(',')
+                if n.strip()
+            ]
+            cat_hash = {}
+            for n in names:
+                for c in self.cats.values():
+                    if c['name'] == n:
+                        cat_hash[n] = c
+                        break
+            self.posts[pid]['categories'] = cat_hash
+            return self.posts[pid]
+        if '/posts/' in path and method == 'GET':
+            pid = int(path.split('/posts/')[1])
+            return self.posts[pid]
+        if path.endswith('/settings') and method == 'GET':
+            return {'settings': {'default_category': self.default_id}}
+        if path.endswith('/settings') and method == 'POST':
+            self.default_id = int(
+                data.get('default_category', self.default_id)
+            )
+            return {}
+        raise RuntimeError(f'unstubbed: {method} {path}')
+
+
+def _make_cats():
+    return {
+        1: {'ID': 1, 'name': 'General', 'slug': 'general',
+            'description': '', 'parent': 0, 'post_count': 0},
+        2: {'ID': 2, 'name': 'Tech', 'slug': 'tech',
+            'description': 'old desc', 'parent': 0, 'post_count': 5},
+    }
+
+
+def _make_posts():
+    return {
+        123: {'ID': 123, 'title': 'Hello',
+              'categories': {
+                  'Tech': {'ID': 2, 'name': 'Tech', 'slug': 'tech',
+                           'parent': 0},
+              }},
+    }
+
+
+class TestLogging(unittest.TestCase):
+    """Tests for the term/post mutation logging hooks."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.changes = os.path.join(self.workdir, 'changes.tsv')
+        self.terms = os.path.join(self.workdir, 'terms.tsv')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def test_create_category_logs_to_terms(self):
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.set_logging(terms_log_path=self.terms)
+        adapter.create_category('New', 'new-cat', 'desc')
+        from helpers import parse_terms_log
+        rows = parse_terms_log(self.terms)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['action'], ACTION_CREATE_CAT)
+        self.assertEqual(rows[0]['slug'], 'new-cat')
+
+    def test_delete_category_logs_full_snapshot(self):
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.set_logging(terms_log_path=self.terms)
+        adapter.delete_category(2)
+        from helpers import parse_terms_log
+        rows = parse_terms_log(self.terms)
+        self.assertEqual(rows[0]['action'], ACTION_DELETE_CAT)
+        snapshot = json.loads(rows[0]['old_value'])
+        self.assertEqual(snapshot['slug'], 'tech')
+        self.assertEqual(snapshot['description'], 'old desc')
+
+    def test_update_category_logs_per_field(self):
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.set_logging(terms_log_path=self.terms)
+        adapter.update_category(2, {'description': 'new', 'name': 'Tech 2'})
+        from helpers import parse_terms_log
+        rows = parse_terms_log(self.terms)
+        fields = {r['field'] for r in rows}
+        self.assertIn('description', fields)
+        self.assertIn('name', fields)
+        desc_row = next(r for r in rows if r['field'] == 'description')
+        self.assertEqual(desc_row['old_value'], 'old desc')
+        self.assertEqual(desc_row['new_value'], 'new')
+
+    def test_set_post_categories_logs_change(self):
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.set_logging(changes_log_path=self.changes)
+        adapter.set_post_categories(
+            123, [1, 2], old_category_ids=[2], post_title='Hello',
+        )
+        from helpers import parse_change_log
+        rows = parse_change_log(self.changes)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['action'], ACTION_SET_CATS)
+        self.assertEqual(rows[0]['old_categories'], 'Tech')
+        self.assertIn('General', rows[0]['new_categories'])
+
+    def test_set_post_categories_raises_without_old_ids(self):
+        """Codex fix #3: must reject calls that would produce bad log rows."""
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.set_logging(changes_log_path=self.changes)
+        with self.assertRaises(ValueError) as ctx:
+            adapter.set_post_categories(123, [2])
+        self.assertIn('old_category_ids is required', str(ctx.exception))
+
+    def test_set_default_logs(self):
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.set_logging(terms_log_path=self.terms)
+        adapter.set_default_category(2)
+        from helpers import parse_terms_log
+        rows = parse_terms_log(self.terms)
+        self.assertEqual(rows[0]['action'], ACTION_SET_DEFAULT)
+        self.assertIn('general', rows[0]['old_value'])
+
+
+class TestRestoreFromLogs(unittest.TestCase):
+    """Tests for inverse-replay restore."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.changes = os.path.join(self.workdir, 'changes.tsv')
+        self.terms = os.path.join(self.workdir, 'terms.tsv')
+        self.backup = os.path.join(self.workdir, 'backup.json')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def _apply_and_revert(self):
+        """Run a mini apply then revert. Returns (adapter, result)."""
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+        adapter.set_logging(self.changes, self.terms)
+
+        # Simulate a Taxonomist apply run.
+        adapter.create_category('Remote Work', 'remote-work', 'WFH stuff')
+        adapter.update_category(2, {'description': 'new desc'})
+        new_id = max(adapter.cats.keys())
+        adapter.set_post_categories(
+            123, [2, new_id], old_category_ids=[2], post_title='Hello',
+        )
+        adapter.set_default_category(2)
+        adapter.delete_category(1)
+
+        adapter.set_logging()  # disable before restore
+        result = adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS,
+            dry_run=False,
+        )
+        return adapter, result
+
+    def test_round_trip(self):
+        """Apply + revert should recover the baseline exactly."""
+        adapter, result = self._apply_and_revert()
+        self.assertFalse(result['errors'])
+        self.assertEqual(result['mode'], MODE_LOGS)
+
+        with open(self.backup) as f:
+            baseline = json.load(f)
+        after_cats = sorted(
+            (c['slug'], c['name'], c.get('description', ''))
+            for c in adapter.cats.values()
+        )
+        base_cats = sorted(
+            (c['slug'], c['name'], c.get('description', ''))
+            for c in baseline['categories']
+        )
+        self.assertEqual(after_cats, base_cats)
+
+    def test_dry_run_makes_no_changes(self):
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+        adapter.set_logging(self.changes, self.terms)
+        adapter.create_category('X', 'x')
+        adapter.set_logging()
+
+        cats_before = dict(adapter.cats)
+        result = adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS,
+            dry_run=True,
+        )
+        self.assertTrue(result['dry_run'])
+        self.assertTrue(len(result['operations']) > 0)
+        # Cats unchanged.
+        self.assertEqual(set(adapter.cats.keys()), set(cats_before.keys()))
+
+    def test_update_cat_after_slug_rename(self):
+        """Codex fix #2: UPDATE_CAT should use term_id for robust lookup."""
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.set_logging(terms_log_path=self.terms)
+
+        # Rename slug AND update description in one call — produces two
+        # log rows both tagged with the old slug.
+        adapter.update_category(2, {'slug': 'technology', 'description': 'new'})
+        adapter.set_logging()
+
+        # Write an empty changes log so both logs exist for auto mode.
+        with open(self.changes, 'w') as f:
+            f.write('')
+
+        result = adapter.restore(
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS,
+            dry_run=False,
+        )
+        self.assertFalse(result['errors'])
+        self.assertEqual(adapter.cats[2]['slug'], 'tech')
+        self.assertEqual(adapter.cats[2]['description'], 'old desc')
+
+    def test_hierarchy_restored_after_delete(self):
+        """Codex fix (parent-ID mapping): deleted child gets correct parent."""
+        cats = {
+            10: {'ID': 10, 'name': 'Parent', 'slug': 'parent',
+                 'description': '', 'parent': 0, 'post_count': 0},
+            20: {'ID': 20, 'name': 'Child', 'slug': 'child',
+                 'description': '', 'parent': 10, 'post_count': 0},
+        }
+        adapter = FakeWpcom(cats=cats, default_id=10)
+        adapter.set_logging(self.changes, self.terms)
+
+        adapter.set_default_category(20)
+        adapter.default_id = 20
+        adapter.delete_category(20)
+        adapter.delete_category(10)
+        adapter.set_logging()
+
+        result = adapter.restore(
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS,
+            dry_run=False,
+        )
+        self.assertFalse(result['errors'])
+        parent = next(
+            c for c in adapter.cats.values() if c['slug'] == 'parent'
+        )
+        child = next(
+            c for c in adapter.cats.values() if c['slug'] == 'child'
+        )
+        # Child's parent should be the recreated parent's new live ID.
+        self.assertEqual(child['parent'], parent['ID'])
+
+
+class TestRestoreFromSnapshot(unittest.TestCase):
+    """Tests for full-snapshot restore."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.backup = os.path.join(self.workdir, 'backup.json')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def test_round_trip(self):
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+
+        # Mutate without logging.
+        adapter.create_category('New', 'new')
+        adapter.update_category(2, {'description': 'changed'})
+
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=False,
+        )
+        self.assertFalse(result['errors'])
+        self.assertEqual(result['mode'], MODE_SNAPSHOT)
+
+        with open(self.backup) as f:
+            baseline = json.load(f)
+        after_cats = sorted(c['slug'] for c in adapter.cats.values())
+        base_cats = sorted(c['slug'] for c in baseline['categories'])
+        self.assertEqual(after_cats, base_cats)
+
+    def test_hierarchy_reconciled(self):
+        """Codex fix #4: snapshot restore should fix parent-child."""
+        cats = _make_cats()
+        cats[2]['parent'] = 1  # Tech is child of General
+        adapter = FakeWpcom(cats=cats)
+        adapter.backup(self.backup)
+
+        adapter.update_category(2, {'parent': 0})
+        self.assertEqual(adapter.cats[2]['parent'], 0)
+
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=False,
+        )
+        self.assertFalse(result['errors'])
+        self.assertEqual(adapter.cats[2]['parent'], 1)
+
+    def test_dry_run(self):
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.backup(self.backup)
+        adapter.create_category('New', 'new')
+        cats_before = set(adapter.cats.keys())
+
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=True,
+        )
+        self.assertTrue(result['dry_run'])
+        self.assertEqual(set(adapter.cats.keys()), cats_before)
+
+
+class TestRestoreAutoMode(unittest.TestCase):
+    """Tests for mode=auto fallback behavior."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.changes = os.path.join(self.workdir, 'changes.tsv')
+        self.terms = os.path.join(self.workdir, 'terms.tsv')
+        self.backup = os.path.join(self.workdir, 'backup.json')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def test_both_logs_uses_log_mode(self):
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+        adapter.set_logging(self.changes, self.terms)
+        adapter.create_category('X', 'x')
+        adapter.set_post_categories(
+            123, [1], old_category_ids=[2], post_title='Hello',
+        )
+        adapter.set_logging()
+
+        result = adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            dry_run=True,
+        )
+        self.assertEqual(result['mode'], MODE_LOGS)
+
+    def test_one_log_falls_back_to_snapshot(self):
+        """Codex fix #1: partial logs → snapshot, not partial replay."""
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+        adapter.set_logging(self.changes, self.terms)
+        adapter.create_category('X', 'x')
+        adapter.set_logging()
+
+        # Only the terms log was written (no post changes were made).
+        # Confirm changes log does NOT exist — only terms does.
+        self.assertFalse(os.path.exists(self.changes))
+
+        result = adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            dry_run=True,
+        )
+        self.assertEqual(result['mode'], MODE_SNAPSHOT)
+        # Should contain a warning about the partial log.
+        warnings = [e for e in result['errors'] if e.get('op') is None]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('changes', warnings[0]['error'].lower())
+
+    def test_no_logs_no_backup_raises(self):
+        adapter = FakeWpcom(cats=_make_cats())
+        with self.assertRaises(ValueError):
+            adapter.restore()
+
+
+class TestPartialRestoreError(unittest.TestCase):
+    """Tests for partial failure signaling."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.backup = os.path.join(self.workdir, 'backup.json')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def test_clean_restore_returns_result(self):
+        """A successful restore should return the result dict, not raise."""
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+        adapter.create_category('X', 'x')
+
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=False,
+        )
+        self.assertFalse(result['partial'])
+        self.assertFalse(result['errors'])
+
+    def test_partial_restore_raises(self):
+        """A restore with errors must raise PartialRestoreError."""
+        workdir = tempfile.mkdtemp(prefix='taxo-partial-')
+        try:
+            terms_log = os.path.join(workdir, 'terms.tsv')
+            changes_log = os.path.join(workdir, 'changes.tsv')
+
+            # Write a changes log that references a category name that
+            # doesn't exist on the live site. The revert will fail to
+            # find it, producing an error.
+            adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+            adapter.set_logging(changes_log, terms_log)
+            adapter.create_category('Ephemeral', 'ephemeral')
+            eid = next(c['ID'] for c in adapter.cats.values()
+                       if c['slug'] == 'ephemeral')
+            adapter.set_post_categories(
+                123, [eid], old_category_ids=[2], post_title='Hello',
+            )
+            adapter.set_logging()
+
+            # Now delete the original 'Tech' category so the revert can't
+            # restore post 123 back to ['Tech'] — it's gone.
+            adapter.delete_category(2)
+
+            with self.assertRaises(PartialRestoreError) as ctx:
+                adapter.restore(
+                    changes_log_path=changes_log,
+                    terms_log_path=terms_log,
+                    mode=MODE_LOGS,
+                    dry_run=False,
+                )
+            result = ctx.exception.result
+            self.assertTrue(result['partial'])
+            self.assertTrue(len(result['errors']) > 0)
+        finally:
+            shutil.rmtree(workdir)
+
+    def test_partial_flag_on_result(self):
+        """The result dict always has a 'partial' boolean."""
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.backup(self.backup)
+
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=True,
+        )
+        self.assertIn('partial', result)
+        self.assertIsInstance(result['partial'], bool)
+
+    def test_dry_run_with_errors_does_not_raise(self):
+        """Dry-run should never raise even if there would be errors."""
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.backup(self.backup)
+
+        # Dry-run always succeeds without raising.
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=True,
+        )
+        self.assertFalse(result['partial'])
+
+
+class TestRestoreLog(unittest.TestCase):
+    """Tests for the streamed restore audit log."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.changes = os.path.join(self.workdir, 'changes.tsv')
+        self.terms = os.path.join(self.workdir, 'terms.tsv')
+        self.backup = os.path.join(self.workdir, 'backup.json')
+        self.restore_log = os.path.join(self.workdir, 'restore.tsv')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def test_restore_log_written_during_log_replay(self):
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+        adapter.set_logging(self.changes, self.terms)
+        adapter.create_category('X', 'x-cat')
+        adapter.set_post_categories(
+            123, [1], old_category_ids=[2], post_title='Hello',
+        )
+        adapter.set_logging()
+
+        adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS, dry_run=False,
+            restore_log_path=self.restore_log,
+        )
+        self.assertTrue(os.path.exists(self.restore_log))
+        with open(self.restore_log) as f:
+            lines = f.readlines()
+        # Header + at least 2 ops (SET_CATS + CREATE_CAT inverse).
+        self.assertGreaterEqual(len(lines), 3)
+        self.assertIn('kind', lines[0])  # header row
+
+    def test_restore_log_written_during_snapshot(self):
+        adapter = FakeWpcom(cats=_make_cats(), posts=_make_posts())
+        adapter.backup(self.backup)
+        adapter.create_category('X', 'x-cat')
+
+        adapter.restore(
+            backup_path=self.backup,
+            mode=MODE_SNAPSHOT, dry_run=False,
+            restore_log_path=self.restore_log,
+        )
+        self.assertTrue(os.path.exists(self.restore_log))
+        with open(self.restore_log) as f:
+            content = f.read()
+        self.assertIn('delete_category', content)
+
+    def test_no_restore_log_on_dry_run(self):
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.backup(self.backup)
+
+        adapter.restore(
+            backup_path=self.backup,
+            mode=MODE_SNAPSHOT, dry_run=True,
+            restore_log_path=self.restore_log,
+        )
+        self.assertFalse(os.path.exists(self.restore_log))
+
+
+class TestReadBackVerification(unittest.TestCase):
+    """Tests for post-mutation read-back verification."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.changes = os.path.join(self.workdir, 'changes.tsv')
+        self.terms = os.path.join(self.workdir, 'terms.tsv')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def test_verification_passes_on_clean_restore(self):
+        """No verification errors when mutations succeed normally."""
+        adapter = FakeWpcom(cats=_make_cats())
+        adapter.set_logging(terms_log_path=self.terms)
+        adapter.create_category('X', 'x-cat', 'desc')
+        adapter.set_logging()
+
+        with open(self.changes, 'w') as f:
+            f.write('')
+
+        result = adapter.restore(
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS, dry_run=False,
+        )
+        # No verification keys should appear on ops.
+        for op in result['operations']:
+            self.assertNotIn('verification', op)
 
 
 if __name__ == '__main__':

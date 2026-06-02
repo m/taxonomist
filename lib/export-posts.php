@@ -5,7 +5,7 @@
  * Streams posts one-by-one to avoid memory issues on large sites.
  * Output is a JSON array where each element contains the post ID, title,
  * publication date, full text content (HTML stripped), assigned category
- * names, and permalink URL.
+ * names, category term IDs, category slugs, and permalink URL.
  *
  * Usage:
  *   wp eval-file export-posts.php
@@ -22,6 +22,8 @@
  *       "date": "2024-01-15 10:30:00",
  *       "content": "Full post text with HTML stripped...",
  *       "categories": ["WordPress", "Tech"],
+ *       "category_ids": [4, 9],
+ *       "category_slugs": ["wp", "tech"],
  *       "url": "https://example.com/2024/01/post-title/"
  *     },
  *     ...
@@ -99,10 +101,11 @@ while ( true ) {
 			$write_or_error( $fp, ",\n", 'JSON separator to ' . $output_file );
 		}
 		$first = false;
-		// Get both category names (for AI analysis readability) and slugs
-		// (as stable identifiers that survive renames). The apply script
-		// resolves suggestions by slug, not name, to prevent drift.
+		// Export category names for readability, plus term IDs as the
+		// authoritative identifier for analysis/apply. Slugs stay in the
+		// export for API adapters that need them at the final request step.
 		$cat_names = wp_get_post_categories( $p->ID, array( 'fields' => 'names' ) );
+		$cat_ids   = wp_get_post_categories( $p->ID );
 		$cat_slugs = wp_get_post_categories( $p->ID, array( 'fields' => 'slugs' ) );
 
 		// Strip HTML and collapse whitespace for clean plain-text content.
@@ -118,6 +121,7 @@ while ( true ) {
 				'date'           => $p->post_date,
 				'content'        => $content,
 				'categories'     => array_values( $cat_names ),
+				'category_ids'   => array_values( $cat_ids ),
 				'category_slugs' => array_values( $cat_slugs ),
 				'url'            => get_permalink( $p->ID ),
 			)

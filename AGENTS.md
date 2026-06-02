@@ -25,18 +25,19 @@ This is an AI-assisted tool. Users download this repo, open it with their AI cod
 ### Workflow
 
 1. **Connect** — Detect and configure access to the WordPress site
-2. **Export** — Download all posts (full content) and categories locally
-3. **Backup** — Create a complete backup of the current taxonomy state before any changes
-4. **Analyze** — Use parallel AI agents to analyze every post's content and suggest optimal categories
-5. **Validate** — Run automated checks on analysis results before presenting to the user (see Validation below)
-6. **Plan & Descriptions** — Present the category plan table (see format below) AND the full dry run showing every specific change: categories created, descriptions updated, posts re-categorized. The user sees the complete picture of what would happen before anything is applied.
-7. **Review** — Iterate with the user until the plan is right
-8. **Authenticate** — Only after the user approves the dry run, ask for write credentials
-9. **Apply descriptions** — Update category descriptions first, before any post changes
-10. **Apply categories** — Execute post category changes, logging every single change
-11. **Verify** — Confirm the site still works and categories look correct
+2. **Verify capabilities** — Confirm the authenticated account has `manage_categories` on the target site. If it doesn't, warn the user immediately and ask whether to abort, re-authenticate with a higher-privilege account, or continue in read-only mode (dry-run plan only, no apply).
+3. **Export** — Download all posts (full content) and categories locally
+4. **Backup** — Create a complete backup of the current taxonomy state before any changes
+5. **Analyze** — Use parallel AI agents to analyze every post's content and suggest optimal categories
+6. **Validate** — Run automated checks on analysis results before presenting to the user (see Validation below)
+7. **Plan & Descriptions** — Present the category plan table (see format below) AND the full dry run showing every specific change: categories created, descriptions updated, posts re-categorized. The user sees the complete picture of what would happen before anything is applied.
+8. **Review** — Iterate with the user until the plan is right
+9. **Re-check capabilities** — Re-probe the token right before applying changes in case scope or roles changed between Connect and Apply.
+10. **Apply descriptions** — Update category descriptions first, before any post changes
+11. **Apply categories** — Execute post category changes, logging every single change
+12. **Verify** — Confirm the site still works and categories look correct
 
-**IMPORTANT:** Steps 1-7 require NO write access. The export and analysis use the public API or read-only access. Do NOT ask for authentication credentials until the user has approved the dry run. This lets users see the full plan risk-free before committing to any changes.
+**IMPORTANT — capability check is a hard gate.** The export and analysis steps burn significant tokens. Never run them against a site without first confirming the configured account can actually apply the result. If the user knowingly wants a dry-run-only pass (e.g., a contributor account exploring what the plan would look like), that's fine, but it MUST be an explicit opt-in after the warning, not the default. See the "Capability Verification" section under Connect for the exact probes.
 
 ### Core Principles
 
@@ -101,12 +102,21 @@ Taxonomist is registered as a WordPress.com OAuth2 app (Client ID: `136301`). Us
 Key endpoints:
 - `GET /sites/$site/categories` — list categories (max 1000 per page)
 - `GET /sites/$site/posts?number=100` — list posts (max 100 per page, use `page_handle` for pagination)
-- `POST /sites/$site/posts/$id` — update post categories (`categories` param: comma-separated names)
+- `POST /sites/$site/posts/$id` — update post. For category changes use
+  **v1.2** with `categories_by_id` (array of integer term IDs). This is
+  the only shape that is a true replace and cannot create junk
+  categories. Do not use the `categories` param on this endpoint — see
+  `agents/apply.md` for the silent-failure modes.
 - `POST /sites/$site/categories/new` — create category
 - `POST /sites/$site/categories/slug:$slug` — update category
 - `POST /sites/$site/categories/slug:$slug/delete` — delete category
 
 Note: categories in post responses are returned as a hash keyed by name, not an array of IDs.
+Use exported `term_id` values as the canonical category identifier throughout
+analysis and apply. For category updates or deletes, resolve the exact
+`term_id` / `slug` from `data/export/categories.json` (or the backup
+`categories` array) first, and only translate to slug/name at the API
+boundary when required. Never construct a slug from the display name.
 
 ## Directory Structure
 
@@ -114,6 +124,7 @@ Note: categories in post responses are returned as a hash keyed by name, not an 
 taxonomist/
 ├── AGENTS.md              # AI tool instructions (canonical)
 ├── CLAUDE.md              # Points to AGENTS.md
+├── CONTRIBUTING.md        # How to run tests and lint locally
 ├── config.json            # WordPress connection config (user creates)
 ├── agents/                # AI agent definitions
 │   ├── connect.md         # Detect and configure WordPress access
@@ -143,16 +154,20 @@ taxonomist/
 
 ## Change Logging
 
-Every operation that modifies the site is logged to `data/logs/`. Each log file is a TSV with columns:
+Every operation that modifies the site is logged to `data/logs/`. Each apply run produces:
 
-```
-timestamp  action  post_id  post_title  old_categories  new_categories  cats_added  cats_removed
-```
-
-Log files:
-- `backup-{timestamp}.json` — Complete pre-change state (post→category mappings)
-- `changes-{timestamp}.tsv` — Every individual change made
-- `terms-deleted-{timestamp}.tsv` — Deleted category terms with their original data
+- `data/backups/backup-{timestamp}.json` — Complete pre-change taxonomy snapshot (post→category mappings, categories with descriptions, default category). Always written before any mutation.
+- `data/logs/changes-{timestamp}.tsv` — Per-post category assignment changes. Schema:
+  ```
+  timestamp  action  post_id  post_title  old_categories  new_categories  cats_added  cats_removed
+  ```
+  Action is `SET_CATS`. Written by `lib/apply-changes.php` (WP-CLI) and by `WpcomAdapter.set_post_categories()` when logging is enabled.
+- `data/logs/terms-{timestamp}.tsv` — Term-level operations (create / delete / update / set-default). Schema:
+  ```
+  timestamp  action  term_id  slug  field  old_value  new_value
+  ```
+  Actions are `CREATE_CAT`, `DELETE_CAT`, `UPDATE_CAT` (one row per changed field), and `SET_DEFAULT`. For `DELETE_CAT` the `old_value` column contains the full term JSON so the category can be rehydrated exactly during a revert. Written by the wpcom adapter; for WP-CLI sites the existing `restore.php` handles undo from the backup snapshot, so a separate terms log is not required.
+- `data/logs/restore-{timestamp}.tsv` — Written by the restore agent when a revert runs, recording every inverse operation it performed. Lets a revert itself be audited.
 
 ### Reverting Changes
 
@@ -161,7 +176,15 @@ To undo all changes from a session:
 "Revert the changes from {timestamp}"
 ```
 
-The AI will read the log and backup files and restore the exact previous state.
+The restore agent (`agents/restore.md`) will:
+1. Load the backup and the change/term logs.
+2. Detect the connection method from `config.json`.
+3. Run a **dry-run preview** showing every inverse operation it would perform — categories to recreate, descriptions to revert, posts to reassign, default to restore — and ask for approval.
+4. Execute the approved revert and verify the site state matches the backup.
+
+Two modes are supported. **Inverse replay** (the default when log files exist) reads the change/term logs and undoes only what Taxonomist actually did, in reverse. **Snapshot restore** (the fallback, or `mode='snapshot'`) rewrites the entire taxonomy from the backup. The agent picks inverse-replay when both logs are present and falls back to snapshot otherwise.
+
+For `wp-cli-*` connections the agent uses `lib/restore.php`. For `wpcom-api` it uses `WpcomAdapter.restore()`. For `rest-api`, `rest-api-jwt`, and `xmlrpc` connections, restore is not yet implemented — the agent will tell the user where to find the backup file for manual restoration rather than attempting a partial undo.
 
 ## Result Validation
 
@@ -205,7 +228,18 @@ Present flagged categories to the user for spot-checking before finalizing the p
 
 ## Analysis Approach
 
-Use `lib/helpers.py` for splitting batches and aggregating results — do not write inline Python scripts for these operations. Use `lib/helpers.aggregate_results()` to combine per-batch results.
+Use `lib/helpers.py` for splitting batches, aggregating results, and encoding WordPress API parameters (to avoid the array stringification bug) — do not write inline Python scripts for these operations. Use `lib.helpers.wp_urlencode()` for safe parameter encoding.
+
+**Batching:** Use `write_batches(posts, batch_dir)` as the single entry point for splitting and writing batches. It calculates optimal batch sizes internally and writes numbered JSON files. Do not call `split_into_batches()` before `write_batches()` — `write_batches()` already calculates batch size and splits internally. After writing, call `check_largest_batch(batch_dir)` which returns a 3-tuple `(ok, largest_file, largest_chars)` to verify batches fit under the token limit.
+
+**Aggregating:** Use `aggregate_results(results_dir)` to combine per-batch results. It returns a dict:
+
+```python
+results = aggregate_results('data/results/')
+suggestions = results['suggestions']        # list of suggestion dicts
+category_counts = results['category_counts']  # Counter of slug -> count
+new_category_counts = results['new_category_counts']  # Counter of new cat -> count
+```
 
 Posts are split into adaptively-sized batches (calculated from actual content length to stay under the 10K token Read limit) and analyzed by parallel AI agents. Each agent receives:
 - The full post content (not truncated)
@@ -342,6 +376,8 @@ After applying category changes, perform a spot-check to catch any misapplied ca
 If any mismatches are found, fix them immediately and log the corrections. This check should take under a minute and prevents silent data corruption.
 
 ## Notes for Contributors
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run tests and lint locally.
 
 - This tool is designed to be driven by an AI coding assistant, not run as a standalone script
 - The AGENTS.md file is the primary interface — it tells the AI how to use the tool
