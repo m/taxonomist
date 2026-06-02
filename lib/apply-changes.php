@@ -20,7 +20,10 @@
  * Environment variables:
  *   TAXONOMIST_SUGGESTIONS  Path to the suggestions JSON file. Required.
  *                           Format: [{"post_id": 123, "cats": [4, 9]}, ...]
- *                           Values in "cats" are category term IDs.
+ *                           Values in "cats" must be integer category
+ *                           term IDs — digit-strings are rejected so the
+ *                           apply step catches type-confusion bugs rather
+ *                           than silently coercing them.
  *   TAXONOMIST_LOG          Path for the change log TSV.
  *                           Default: /tmp/taxonomist-changes.tsv
  *   TAXONOMIST_MODE         "preview" (default) shows what would change.
@@ -115,7 +118,9 @@ if ( in_array( $default_cat_id, $remove_ids, true ) ) {
 }
 
 // Pre-flight check: verify all suggested category IDs exist in the live
-// taxonomy and reject non-ID references.
+// taxonomy and reject non-integer references. Strict integer typing
+// matches validate_suggestions() in lib/helpers.py — a digit-string like
+// "42" is treated as a type-confusion bug, not a lenient alias.
 // Abort early if there are unresolved references — this prevents silent
 // data loss from taxonomy drift between export and apply.
 $unresolved   = array();
@@ -123,23 +128,18 @@ $invalid_refs = array();
 foreach ( $suggestions as $suggestion ) {
 	$suggested_refs = isset( $suggestion['cats'] ) ? $suggestion['cats'] : array();
 	foreach ( $suggested_refs as $ref ) {
-		if ( is_int( $ref ) ) {
-			if ( ! isset( $id_to_name[ $ref ] ) ) {
-				$unresolved[ $ref ] = true;
-			}
-		} elseif ( is_string( $ref ) && ctype_digit( $ref ) ) {
-			$ref = (int) $ref;
-			if ( ! isset( $id_to_name[ $ref ] ) ) {
-				$unresolved[ $ref ] = true;
-			}
-		} else {
+		if ( ! is_int( $ref ) ) {
 			$invalid_refs[] = wp_json_encode( $ref );
+			continue;
+		}
+		if ( ! isset( $id_to_name[ $ref ] ) ) {
+			$unresolved[ $ref ] = true;
 		}
 	}
 }
 if ( ! empty( $invalid_refs ) ) {
 	WP_CLI::error(
-		'Suggestions must use category term IDs in "cats". Invalid values: ' .
+		'Suggestions must use integer category term IDs in "cats". Invalid values: ' .
 		implode( ', ', array_unique( $invalid_refs ) )
 	);
 }
@@ -202,11 +202,9 @@ foreach ( $suggestions as $suggestion ) {
 		}
 	}
 
-	// Resolve suggestions to term IDs.
-	$suggested_ids = array();
-	foreach ( $suggested_refs as $ref ) {
-		$suggested_ids[] = (int) $ref;
-	}
+	// Suggestion refs are already guaranteed to be integers by the
+	// pre-flight validation above, so they can be used as term IDs directly.
+	$suggested_ids = $suggested_refs;
 
 	// Merge: union of kept existing + new suggestions.
 	// If empty (all categories removed and no suggestions), WordPress will
