@@ -113,7 +113,8 @@ def main():
                     self.end_headers()
                     self.wfile.write(
                         b"<html><body><h2>Authorization failed</h2>"
-                        b"<p>The OAuth state did not match. Return to the terminal and try again.</p>"
+                        b"<p>The OAuth state did not match. "
+                        b"Return to the terminal and try again.</p>"
                         b"</body></html>"
                     )
                     return
