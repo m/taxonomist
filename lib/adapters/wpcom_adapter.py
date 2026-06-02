@@ -141,7 +141,8 @@ class WpcomAdapter:
 
     # --- HTTP layer ---
 
-    def _request(self, method, path, data=None, params=None):
+    def _request(self, method, path, data=None, params=None,
+                 override_url=None, json_body=None):
         """
         Make a request to the WordPress.com API.
 
@@ -150,6 +151,11 @@ class WpcomAdapter:
             path: API path (e.g., '/sites/{id}/categories').
             data: Dict of form data for POST requests.
             params: Dict of query parameters.
+            override_url: Full URL to use instead of BASE_URL + path.
+                For endpoints on a different API version (e.g., v1.2).
+                When set, `path` is ignored.
+            json_body: If set, send this dict as a JSON body instead of
+                form-urlencoded `data`. Mutually exclusive with `data`.
 
         Returns:
             Parsed JSON response as a dict.
@@ -158,13 +164,18 @@ class WpcomAdapter:
             WpcomApiError: On any API error (including 200 with error
                 field), or if a non-GET request is made without a token.
         """
-        url = f'{self.BASE_URL}{path}'
+        url = override_url if override_url else f'{self.BASE_URL}{path}'
         if params:
             url += '?' + wp_urlencode(params)
 
         body = None
-        if data is not None:
+        content_type = None
+        if json_body is not None:
+            body = json.dumps(json_body).encode('utf-8')
+            content_type = 'application/json'
+        elif data is not None:
             body = wp_urlencode(data).encode('utf-8')
+            content_type = 'application/x-www-form-urlencoded'
 
         if method != 'GET':
             self._require_auth()
@@ -174,7 +185,7 @@ class WpcomAdapter:
             req.add_header('Authorization', f'Bearer {self.access_token}')
         req.add_header('User-Agent', 'taxonomist/1.0')
         if body:
-            req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+            req.add_header('Content-Type', content_type)
 
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
@@ -456,8 +467,11 @@ class WpcomAdapter:
         """
         Set categories for a post by term IDs.
 
-        Resolves IDs to names because the WP.com API accepts
-        comma-separated category names, not IDs.
+        Uses v1.2 + `categories_by_id` because the v1.1 + name-based
+        `categories` parameter silently drops numeric names (it
+        interprets them as term IDs and discards unknown ones). The
+        v1.1 vs v1.2 divergence and the sanctioned shape are
+        documented in PR #10; this method implements the rule in code.
 
         Args:
             post_id: Integer post ID.
@@ -470,10 +484,19 @@ class WpcomAdapter:
             post_title: Optional title for the log row (display only).
 
         Raises:
-            WpcomApiError: If any category ID is not found.
+            WpcomApiError: If any category ID is not found in the
+                local cache, or if the API silently drops one of the
+                submitted IDs (a known `categories_by_id` silent
+                failure mode — see PR #10).
             ValueError: If logging is enabled but old_category_ids is
                 not supplied (would produce an unrevertable log row).
         """
+        # Normalize, then resolve every ID to its name. _resolve_id_to_name
+        # raises 404 for unknown IDs, which doubles as the local validation
+        # we need before hitting the remote endpoint: categories_by_id
+        # silently drops unknown IDs, so catching them locally turns a
+        # silent failure into a loud one.
+        category_ids = [int(cid) for cid in category_ids]
         names = [self._resolve_id_to_name(cid) for cid in category_ids]
 
         old_names = []
@@ -492,10 +515,47 @@ class WpcomAdapter:
                 if cat is not None
             ]
 
-        self._post(
-            f'/sites/{self.site_id}/posts/{post_id}',
-            data={'categories': ','.join(names)},
+        # v1.2 + categories_by_id is the only sanctioned shape for
+        # WP.com post category updates. Name-based v1.1 drops numeric
+        # names; name-based v1.2 creates junk categories literally
+        # named after the numeric value. See PR #10 for the test plan.
+        v1_2_url = (
+            f'https://public-api.wordpress.com/rest/v1.2'
+            f'/sites/{self.site_id}/posts/{post_id}'
         )
+        result = self._request(
+            'POST',
+            path='',
+            override_url=v1_2_url,
+            json_body={'categories_by_id': category_ids},
+        )
+
+        # Detect silent drops: compare returned category IDs against
+        # what we sent. PR #10 documents that `categories_by_id`
+        # silently drops unknown or stale IDs with no error, so the
+        # only reliable check is a read-back of the response.
+        returned_ids = set()
+        terms_cat = (result.get('terms') or {}).get('category') or {}
+        for cat in terms_cat.values():
+            if isinstance(cat, dict) and 'ID' in cat:
+                returned_ids.add(int(cat['ID']))
+        # Fallback: older shape under `categories` (name-keyed hash).
+        if not returned_ids:
+            for cat in (result.get('categories') or {}).values():
+                if isinstance(cat, dict) and 'ID' in cat:
+                    returned_ids.add(int(cat['ID']))
+
+        sent_ids = set(category_ids)
+        if sent_ids and returned_ids != sent_ids:
+            dropped = sorted(sent_ids - returned_ids)
+            extra = sorted(returned_ids - sent_ids)
+            raise WpcomApiError(
+                500, 'categories_drift',
+                f'set_post_categories(post_id={post_id}): sent '
+                f'{sorted(sent_ids)} but post ended with '
+                f'{sorted(returned_ids)} '
+                f'(dropped={dropped}, extra={extra})',
+            )
 
         if self.changes_log_path:
             self._log_post_change(
