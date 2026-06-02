@@ -1150,6 +1150,33 @@ class TestValidateResultIds(unittest.TestCase):
             self.assertTrue(check['valid'])
             self.assertEqual(len(check['suspect_index_files']), 0)
 
+    def test_ignores_batch_manifest(self):
+        """The manifest write_batches() leaves in the batch dir must be
+        skipped, not parsed as a batch (it's a dict, not a post list)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_json(tmpdir, 'batches', 'batch-000.json', [
+                {'post_id': 100, 'title': 'A'},
+                {'post_id': 200, 'title': 'B'},
+            ])
+            # write_batches() always drops this dict-shaped manifest into
+            # the batch directory; validate_result_ids must not choke on it.
+            self._write_json(tmpdir, 'batches', 'batch-manifest.json', {
+                'fingerprint': 'abc',
+                'batch_size': 2,
+                'num_batches': 1,
+            })
+            self._write_json(tmpdir, 'results', 'result-000.json', [
+                {'post_id': 100, 'cats': ['tech']},
+                {'post_id': 200, 'cats': ['food']},
+            ])
+            check = validate_result_ids(
+                os.path.join(tmpdir, 'results'),
+                os.path.join(tmpdir, 'batches'),
+            )
+            self.assertTrue(check['valid'])
+            self.assertEqual(len(check['invalid_ids']), 0)
+            self.assertEqual(len(check['missing_ids']), 0)
+
 
 class TestValidateCategorySlugs(unittest.TestCase):
     """Tests for category slug validation in suggestions."""
