@@ -22,8 +22,17 @@ All configuration should happen through the conversation. Ask for credentials in
    - `curl -s {url}/ | grep -o 'https://api.w.org/[^"]*'` extracts it
    - The REST API URL tells you where wp-admin lives (same base path)
 3. Probe the site — check WordPress.com first:
-   - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` — if this returns site info, it's a WordPress.com site (hosted or Jetpack-connected). **Go straight to the WordPress.com OAuth flow.** Do NOT try password grant, Basic auth, or Application Passwords — they don't work for WordPress.com hosted sites.
-   - If not WordPress.com, check self-hosted methods:
+   - `curl -s https://public-api.wordpress.com/rest/v1.1/sites/{domain}/` — check the response:
+     - **Returns site info** (has `ID`, `name`, `URL` fields): it's a WordPress.com site (hosted or Jetpack-connected). **Go straight to the WordPress.com OAuth flow.** Do NOT try password grant, Basic auth, or Application Passwords — they don't work for WordPress.com hosted sites.
+     - **Returns `"API calls to this blog have been disabled"`**: Jetpack may be installed but the WordPress.com API is not usable. Check the self-hosted Jetpack connection endpoint to find out why:
+       ```
+       curl -s {api_url}/jetpack/v4/connection
+       ```
+       - If `hasConnectedOwner` is `true`: Jetpack is connected but the JSON API module is not active. Tell the user: *"Jetpack is installed on your site, but the JSON API module is not active so we're falling back to another authentication method."* Fall through to self-hosted methods below.
+       - If `hasConnectedOwner` is `false`: Jetpack is installed but not connected to WordPress.com. Tell the user: *"Jetpack is installed but not connected to WordPress.com, falling back to another authentication method."* Fall through to self-hosted methods below.
+       - If the endpoint returns 404: Jetpack is not installed. Fall through to self-hosted methods below.
+     - **Returns empty `{}` or connection error**: not a WordPress.com/Jetpack site. Fall through to self-hosted methods below.
+   - Self-hosted methods:
      - REST API: `curl -s {api_url}/wp/v2/categories | head -c 200`
      - If user mentions SSH: `ssh {user}@{host} "which wp"`
      - XML-RPC (last resort): `curl -s {url}/xmlrpc.php`
