@@ -98,7 +98,9 @@ params = {
         "kb_category": ["General", "Settings"]
     }
 }
-# returns "terms[kb_category][]=General&terms[kb_category][]=Settings"
+# returns "terms%5Bkb_category%5D%5B%5D=General&terms%5Bkb_category%5D%5B%5D=Settings"
+# (brackets are URL-encoded as %5B / %5D; PHP/WordPress decodes them
+# back to terms[kb_category][]=General&terms[kb_category][]=Settings)
 query = wp_urlencode(params)
 ```
 

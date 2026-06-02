@@ -31,15 +31,42 @@ def wp_urlencode(params):
 
     Handles nested dictionaries and lists by flattening them into the
     'key[subkey][]' format expected by PHP/WordPress. Use this to avoid the
-    'stringified list' bug when sending arrays via urllib.parse.urlencode.
+    'stringified list' bug (issue #2) where urllib.parse.urlencode would
+    serialize a list value as its Python repr (e.g. "['a', 'b']") and
+    WordPress would interpret it as a single literal value.
+
+    The returned string has square brackets URL-encoded as %5B / %5D —
+    that is what urllib emits and what goes on the wire. PHP/WordPress
+    decodes them transparently, so
+
+        wp_urlencode({"terms": {"kb_category": ["General", "Settings"]}})
+
+    returns
+
+        "terms%5Bkb_category%5D%5B%5D=General&terms%5Bkb_category%5D%5B%5D=Settings"
+
+    which PHP parses as terms[kb_category] = ["General", "Settings"].
 
     Args:
-        params: Dictionary of parameters (can be nested).
+        params: Dictionary of parameters (can be nested with dicts and
+            lists). Scalar leaf values are passed through ``str()``, so
+            callers should convert booleans/None to the string form they
+            want WordPress to receive.
 
     Returns:
-        URL-encoded string.
+        URL-encoded query string.
+
+    Raises:
+        TypeError: If ``params`` is not a dict. Passing a list, tuple, or
+            scalar would silently produce malformed output (e.g. a
+            top-level list would emit ``[]=value`` with no key), so the
+            boundary is enforced explicitly.
     """
     import urllib.parse
+    if not isinstance(params, dict):
+        raise TypeError(
+            f'wp_urlencode expects a dict, got {type(params).__name__}'
+        )
     flattened = []
 
     def flatten(obj, prefix=''):
