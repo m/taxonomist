@@ -21,10 +21,16 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 from adapters.wpcom_adapter import (
-    WpcomAdapter, WpcomApiError, PartialRestoreError, wp_urlencode,
-    ACTION_CREATE_CAT, ACTION_DELETE_CAT, ACTION_UPDATE_CAT,
-    ACTION_SET_CATS, ACTION_SET_DEFAULT,
-    MODE_AUTO, MODE_LOGS, MODE_SNAPSHOT,
+    ACTION_CREATE_CAT,
+    ACTION_DELETE_CAT,
+    ACTION_SET_CATS,
+    ACTION_SET_DEFAULT,
+    MODE_LOGS,
+    MODE_SNAPSHOT,
+    PartialRestoreError,
+    WpcomAdapter,
+    WpcomApiError,
+    wp_urlencode,
 )
 
 VALID_CONFIG = {

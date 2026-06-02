@@ -269,7 +269,6 @@ class TestAggregateResults(unittest.TestCase):
             result = aggregate_results(tmpdir)
             suggestions = result['suggestions']
             cat_counts = result['category_counts']
-            new_counts = result['new_category_counts']
             self.assertEqual(len(suggestions), 0)
             self.assertEqual(len(cat_counts), 0)
 
@@ -392,7 +391,9 @@ class TestValidateExport(unittest.TestCase):
         ]
         result = validate_export(posts)
         self.assertFalse(result['valid'])
-        self.assertTrue(any('"categories" must contain only strings' in e for e in result['errors']))
+        self.assertTrue(
+            any('"categories" must contain only strings' in e for e in result['errors'])
+        )
 
 
 class TestValidateSuggestions(unittest.TestCase):
