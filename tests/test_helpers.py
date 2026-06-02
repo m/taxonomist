@@ -13,6 +13,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
+# urllib.parse is used to round-trip wp_urlencode output through PHP-style
+# parsing in the regression tests below.
+from urllib.parse import parse_qs, parse_qsl, unquote
+
 from helpers import (
     aggregate_results,
     batch_manifest_path,
@@ -30,10 +34,6 @@ from helpers import (
     wp_urlencode,
     write_batches,
 )
-
-# urllib.parse is used to round-trip wp_urlencode output through PHP-style
-# parsing in the regression tests below.
-from urllib.parse import parse_qs, parse_qsl, unquote
 
 
 class TestSplitIntoBatches(unittest.TestCase):
