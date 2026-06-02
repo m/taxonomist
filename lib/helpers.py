@@ -14,7 +14,6 @@ import json
 import os
 from collections import Counter
 
-
 # Token limit for agent Read tool. Override via TAXONOMIST_MAX_BATCH_TOKENS env var.
 # Default 8000 gives headroom under the typical 10K limit. The export agent
 # should call probe_read_limit() to discover the actual limit at runtime and
@@ -336,7 +335,8 @@ def validate_export(posts):
                 )
 
         for field in ('categories', 'category_slugs'):
-            if isinstance(post.get(field), list) and any(not isinstance(value, str) for value in post[field]):
+            values = post.get(field)
+            if isinstance(values, list) and any(not isinstance(v, str) for v in values):
                 errors.append(
                     f'Post ID {post.get("post_id", f"index {i}")}: '
                     f'"{field}" must contain only strings'
@@ -366,21 +366,22 @@ def validate_suggestions(suggestions):
         if not isinstance(entry, dict):
             errors.append(f'Entry at index {i} is not an object')
             continue
+        label = f'Post ID {entry.get("post_id", f"index {i}")}'
         if 'post_id' not in entry:
             errors.append(f'Entry at index {i}: missing "post_id"')
         elif not isinstance(entry['post_id'], int):
             errors.append(f'Entry at index {i}: "post_id" must be int')
         if 'cats' not in entry:
-            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: missing "cats"')
+            errors.append(f'{label}: missing "cats"')
         elif not isinstance(entry['cats'], list):
-            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "cats" must be list')
+            errors.append(f'{label}: "cats" must be list')
         elif any(not isinstance(cat, str) for cat in entry['cats']):
-            errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "cats" must contain only strings')
+            errors.append(f'{label}: "cats" must contain only strings')
         if 'new_cats' in entry:
             if not isinstance(entry['new_cats'], list):
-                errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "new_cats" must be list')
+                errors.append(f'{label}: "new_cats" must be list')
             elif any(not isinstance(cat, str) for cat in entry['new_cats']):
-                errors.append(f'Post ID {entry.get("post_id", f"index {i}")}: "new_cats" must contain only strings')
+                errors.append(f'{label}: "new_cats" must contain only strings')
 
     return {'valid': not errors, 'errors': errors}
 
@@ -401,7 +402,16 @@ def validate_backup(backup):
     if not isinstance(backup, dict):
         return {'valid': False, 'errors': ['Backup must be a JSON object']}
 
-    for key in ('timestamp', 'site_url', 'total_posts', 'total_categories', 'default_category_slug', 'categories', 'post_categories'):
+    required_keys = (
+        'timestamp',
+        'site_url',
+        'total_posts',
+        'total_categories',
+        'default_category_slug',
+        'categories',
+        'post_categories',
+    )
+    for key in required_keys:
         if key not in backup:
             errors.append(f'Missing required key: "{key}"')
 
@@ -425,8 +435,12 @@ def validate_backup(backup):
                 for field in ('post_id', 'category_slugs'):
                     if field not in pc:
                         errors.append(f'Post mapping at index {i}: missing "{field}"')
-                if isinstance(pc.get('category_slugs'), list) and any(not isinstance(slug, str) for slug in pc['category_slugs']):
-                    errors.append(f'Post mapping at index {i}: "category_slugs" must contain only strings')
+                slugs = pc.get('category_slugs')
+                if isinstance(slugs, list) and any(not isinstance(s, str) for s in slugs):
+                    errors.append(
+                        f'Post mapping at index {i}: '
+                        f'"category_slugs" must contain only strings'
+                    )
 
     return {'valid': not errors, 'errors': errors}
 
