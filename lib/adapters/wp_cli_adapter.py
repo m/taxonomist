@@ -5,6 +5,9 @@ import shlex
 import subprocess
 import tempfile
 
+# Directory holding the bundled PHP scripts (this file lives in lib/adapters/).
+_LIB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def _reject_option_like(value, label):
     """Refuse a value that could be parsed as a command-line option.
@@ -39,8 +42,15 @@ class WpCliAdapter:
         self.wp_cli_flags = self.connection.get('wp_cli_flags', '')
 
     def _wp_base_command(self):
-        """Build the base WP-CLI command as a list of safe argv tokens."""
-        cmd = ['wp', f'--path={self.wp_path}']
+        """Build the base WP-CLI command as a list of safe argv tokens.
+
+        No --path: the command is run from the WP directory instead (see
+        _run_command). wp-cli's --path doesn't follow a symlinked
+        wp-load.php (some managed hosts keep core in a separate directory
+        and symlink wp-load.php into the docroot), but running from the
+        directory resolves the install fine.
+        """
+        cmd = ['wp']
         if self.wp_cli_flags:
             cmd.extend(shlex.split(self.wp_cli_flags))
         return cmd
@@ -67,7 +77,12 @@ class WpCliAdapter:
         return result.stdout
 
     def _run_command(self, args, env=None):
-        """Build and run a WP-CLI command without invoking a local shell."""
+        """Build and run a WP-CLI command without invoking a local shell.
+
+        Runs from the configured WP directory (cd over SSH, cwd locally)
+        so wp-cli auto-detects the install even when wp-load.php is a
+        symlink.
+        """
         env = {key: str(value) for key, value in (env or {}).items()}
         cmd = [*self._wp_base_command(), *args]
 
@@ -76,15 +91,32 @@ class WpCliAdapter:
                 f'{key}={shlex.quote(value)}' for key, value in env.items()
             )
             quoted_cmd = ' '.join(shlex.quote(part) for part in cmd)
-            remote_cmd = f'{env_prefix} {quoted_cmd}'.strip()
+            cd_prefix = f'cd {shlex.quote(self.wp_path)} &&'
+            remote_cmd = ' '.join(
+                p for p in (cd_prefix, env_prefix, quoted_cmd) if p
+            )
             return self._run_remote_shell(remote_cmd)
 
         local_env = os.environ.copy()
         local_env.update(env)
-        result = subprocess.run(cmd, capture_output=True, text=True, env=local_env)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, env=local_env,
+            cwd=self.wp_path,
+        )
         if result.returncode != 0:
             raise Exception(f'WP-CLI error: {result.stderr}')
         return result.stdout
+
+    def _upload(self, local_path, remote_path):
+        """Copy a local file to the remote host over scp."""
+        result = subprocess.run(
+            ['scp', '--', local_path,
+             f'{self._ssh_target()}:{remote_path}'],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise Exception(f'SCP upload error: {result.stderr}')
 
     def list_categories(self):
         """List all categories as JSON."""
@@ -95,17 +127,26 @@ class WpCliAdapter:
         return json.loads(output)
 
     def export_posts(self, output_path):
-        """Export posts using the lib/export-posts.php script."""
-        php_script = 'lib/export-posts.php'
+        """Export posts using the bundled export-posts.php script.
+
+        The script ships with this repo, not on the target, so it is
+        referenced by absolute path locally and uploaded before use over
+        SSH (the remote home is not the repo).
+        """
+        php_script = os.path.join(_LIB_DIR, 'export-posts.php')
 
         if self.method == 'wp-cli-ssh':
+            token = next(tempfile._get_candidate_names())
             remote_output = posixpath.join(
-                '/tmp',
-                f'taxonomist-export-{next(tempfile._get_candidate_names())}.json',
+                '/tmp', f'taxonomist-export-{token}.json',
+            )
+            remote_script = posixpath.join(
+                '/tmp', f'taxonomist-export-posts-{token}.php',
             )
             try:
+                self._upload(php_script, remote_script)
                 self._run_command(
-                    ['eval-file', php_script],
+                    ['eval-file', remote_script],
                     env={'TAXONOMIST_OUTPUT': remote_output},
                 )
                 result = subprocess.run(
@@ -118,7 +159,10 @@ class WpCliAdapter:
                     raise Exception(f'SCP error: {result.stderr}')
             finally:
                 try:
-                    self._run_remote_shell(f'rm -f -- {shlex.quote(remote_output)}')
+                    self._run_remote_shell(
+                        f'rm -f -- {shlex.quote(remote_output)} '
+                        f'{shlex.quote(remote_script)}'
+                    )
                 except Exception:
                     pass
             return output_path
