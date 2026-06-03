@@ -840,7 +840,15 @@ class WpcomAdapter:
         """
         resp = self._get(f'/sites/{self.site_id}/settings')
         settings = resp if 'default_category' in resp else resp.get('settings', {})
-        default_id = settings.get('default_category', 1)
+        # Don't guess a fallback ID: a wrong default feeds the restore
+        # delete-protection logic and could let the real default be deleted.
+        if 'default_category' not in settings:
+            raise WpcomApiError(
+                500, 'default_category_unknown',
+                'Settings response did not include default_category; '
+                'refusing to guess the site default category.',
+            )
+        default_id = settings['default_category']
 
         cat = self._get_category_by_id(default_id)
         if cat is None:
@@ -949,12 +957,16 @@ class WpcomAdapter:
         # Resolve default category slug. The /sites/{id}/settings endpoint
         # requires authentication even on public sites, so suppress 401/403
         # to allow read-only backups without a token. Also suppress 404
-        # (category genuinely missing). Other errors should propagate.
+        # (category genuinely missing) and default_category_unknown (the
+        # settings response didn't carry a default) — in both cases the
+        # backup records an empty default and continues rather than failing
+        # outright. Other errors should propagate.
         try:
             default_cat = self.get_default_category()
             default_slug = default_cat.get('slug', '')
         except WpcomApiError as e:
-            if e.status_code in (401, 403, 404):
+            if (e.status_code in (401, 403, 404)
+                    or e.error == 'default_category_unknown'):
                 default_slug = ''
             else:
                 raise

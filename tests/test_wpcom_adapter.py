@@ -862,6 +862,22 @@ class TestGetDefaultCategory(unittest.TestCase):
         result = adapter.get_default_category()
         self.assertEqual(result['name'], 'Uncategorized')
 
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_raises_when_settings_missing_default(self, mock_urlopen):
+        """If the settings response carries no default_category, raise
+        rather than silently assuming category ID 1. A wrong default feeds
+        the restore delete-protection logic and could let the real default
+        be deleted."""
+        cat = {'ID': 1, 'name': 'Uncategorized', 'slug': 'uncategorized',
+               'parent': 0}
+        mock_urlopen.side_effect = [
+            _mock_response({'settings': {}}),  # no default_category
+            _mock_response({'found': 1, 'categories': [cat]}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError):
+            adapter.get_default_category()
+
 
 class TestBackup(unittest.TestCase):
     """Tests for full taxonomy backup.
@@ -958,6 +974,36 @@ class TestBackup(unittest.TestCase):
             self.assertEqual(backup['total_posts'], 250)
             ids = [p['post_id'] for p in backup['post_categories']]
             self.assertEqual(ids, list(range(1, 251)))
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_backup_degrades_when_default_unknown(self, mock_urlopen):
+        """If /settings returns 200 but without default_category, the
+        backup must still succeed with an empty default_category_slug
+        rather than propagating the (now loud) unknown-default error."""
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': 'Technology', 'post_count': 5}
+        post = {
+            'ID': 100, 'title': 'Test',
+            'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+        }
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),
+            _mock_response({'found': 1, 'posts': [post], 'meta': {}}),
+            _mock_response({'found': 1, 'posts': [], 'meta': {}}),
+            # settings present but missing default_category
+            _mock_response({'settings': {}}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            with open(output_path) as f:
+                backup = json.load(f)
+            self.assertEqual(backup['default_category_slug'], '')
+            self.assertEqual(backup['total_posts'], 1)
         finally:
             os.unlink(output_path)
 
