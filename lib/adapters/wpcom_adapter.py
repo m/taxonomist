@@ -636,14 +636,26 @@ class WpcomAdapter:
         """
         Create a new category.
 
+        Two WordPress.com /categories/new behaviors to know about (verified
+        empirically; they differ from WP-CLI):
+
+        - The `slug` argument is advisory. WP.com derives the slug from the
+          name and ignores the value sent here, so the returned category may
+          have a different slug than requested. Always read the slug back
+          from the returned dict rather than assuming the requested one.
+        - Duplicate display names at the same level are rejected with a 400
+          ("A taxonomy with that name already exists"), surfaced as a
+          WpcomApiError. WP-CLI allows same-name categories with distinct
+          slugs; WP.com does not.
+
         Args:
             name: Display name.
-            slug: URL slug.
+            slug: Requested URL slug (advisory on WP.com — see above).
             description: Category description.
             parent: Parent category ID (0 for top-level).
 
         Returns:
-            API response dict with the new category.
+            API response dict with the new category (use its `slug`).
         """
         data = {'name': name}
         if slug:
