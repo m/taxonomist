@@ -119,5 +119,72 @@ class TestSetPostCategories(unittest.TestCase):
         self.assertEqual(argv[-3:], ['5', '7', '--by=id'])
 
 
+class TestRunsFromWpPath(unittest.TestCase):
+    """The adapter must run wp from the WP directory rather than passing
+    --path, because --path doesn't follow a symlinked wp-load.php (some
+    managed hosts keep core in a separate directory and symlink wp-load.php
+    into the docroot)."""
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_local_uses_cwd_not_path_flag(self, mock_run):
+        mock_run.return_value = _ok_run()
+        adapter = WpCliAdapter(_local_config(wp_path='/srv/htdocs'))
+        adapter.list_categories()
+        argv = mock_run.call_args[0][0]
+        kwargs = mock_run.call_args[1]
+        self.assertEqual(kwargs.get('cwd'), '/srv/htdocs')
+        self.assertFalse(
+            any(str(a).startswith('--path=') for a in argv),
+            f'should not pass --path: {argv}',
+        )
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_ssh_cds_into_wp_path(self, mock_run):
+        mock_run.return_value = _ok_run()
+        adapter = WpCliAdapter(_ssh_config(wp_path='/srv/htdocs'))
+        adapter.list_categories()
+        remote_cmd = mock_run.call_args[0][0][-1]
+        self.assertIn('cd /srv/htdocs', remote_cmd)
+        self.assertNotIn('--path=', remote_cmd)
+
+
+class TestExportUploadsScript(unittest.TestCase):
+    """export_posts must not assume lib/export-posts.php already exists on
+    the target. Locally it uses an absolute path; over SSH it uploads the
+    script first and eval-files the uploaded copy."""
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_local_export_uses_absolute_script_path(self, mock_run):
+        mock_run.return_value = _ok_run()
+        adapter = WpCliAdapter(_local_config())
+        adapter.export_posts('/tmp/out.json')
+        argv = mock_run.call_args[0][0]
+        script = argv[argv.index('eval-file') + 1]
+        self.assertTrue(os.path.isabs(script), f'not absolute: {script}')
+        self.assertTrue(script.endswith('export-posts.php'))
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_ssh_export_uploads_script_then_eval_files_it(self, mock_run):
+        mock_run.return_value = _ok_run()
+        adapter = WpCliAdapter(_ssh_config())
+        adapter.export_posts('/tmp/out.json')
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        # An scp call that uploads the local export-posts.php to a remote path.
+        uploads = [
+            c for c in calls
+            if c[0] == 'scp'
+            and any(str(a).endswith('export-posts.php') for a in c)
+            and any(str(a).startswith('root@example.com:') for a in c)
+        ]
+        self.assertTrue(uploads, f'no script upload found: {calls}')
+        # The eval-file command must target the uploaded remote copy, not the
+        # repo-relative lib/export-posts.php.
+        evalfile_cmds = [
+            c[-1] for c in calls if c[0] == 'ssh' and 'eval-file' in c[-1]
+        ]
+        self.assertTrue(evalfile_cmds, f'no eval-file ssh call: {calls}')
+        self.assertNotIn('lib/export-posts.php', evalfile_cmds[0])
+
+
 if __name__ == '__main__':
     unittest.main()
