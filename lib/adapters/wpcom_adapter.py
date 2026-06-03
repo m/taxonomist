@@ -437,6 +437,7 @@ class WpcomAdapter:
                 # Normalize categories from {name: {ID: ...}} hash to list.
                 cat_hash = post.get('categories') or {}
                 cat_names = list(cat_hash.keys())
+                cat_ids = [int(v['ID']) for v in cat_hash.values()]
                 cat_slugs = [v.get('slug', '') for v in cat_hash.values()]
 
                 content = post.get('content', '')
@@ -450,6 +451,7 @@ class WpcomAdapter:
                     'date': post.get('date', ''),
                     'content': content,
                     'categories': cat_names,
+                    'category_ids': cat_ids,
                     'category_slugs': cat_slugs,
                     'url': post.get('URL', ''),
                 })

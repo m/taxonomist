@@ -701,6 +701,44 @@ class TestExportPosts(unittest.TestCase):
             os.unlink(output_path)
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_export_includes_category_ids(self, mock_urlopen):
+        """category_ids is the canonical identifier and is required by
+        validate_export and the apply log contract. The wpcom export must
+        emit it, matching the WP-CLI export and backup()."""
+        import helpers
+        post = {
+            'ID': 1,
+            'title': 'Test',
+            'content': 'Body',
+            'date': '2024-01-01',
+            'categories': {
+                'Tech': {'ID': 10, 'slug': 'tech'},
+                'AI': {'ID': 20, 'slug': 'ai'},
+            },
+            'URL': 'https://example.com/test',
+        }
+        mock_urlopen.return_value = _mock_response({
+            'found': 1, 'posts': [post], 'meta': {},
+        })
+        adapter = WpcomAdapter(VALID_CONFIG)
+
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.export_posts(output_path)
+            with open(output_path) as f:
+                exported = json.load(f)
+            self.assertEqual(exported[0]['category_ids'], [10, 20])
+            self.assertTrue(all(
+                isinstance(cid, int) for cid in exported[0]['category_ids']
+            ))
+            # The export must satisfy the shared export-format validator.
+            check = helpers.validate_export(exported)
+            self.assertTrue(check['valid'], check['errors'])
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
     def test_pagination(self, mock_urlopen):
         post1 = {
             'ID': 1, 'title': 'P1', 'content': '', 'date': '',
