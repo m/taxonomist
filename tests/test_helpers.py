@@ -29,7 +29,7 @@ from helpers import (
     resolve_category_export_row,
     split_into_batches,
     validate_backup,
-    validate_category_slugs,
+    validate_category_ids,
     validate_export,
     validate_result_ids,
     validate_suggestions,
@@ -1178,35 +1178,52 @@ class TestValidateResultIds(unittest.TestCase):
             self.assertEqual(len(check['missing_ids']), 0)
 
 
-class TestValidateCategorySlugs(unittest.TestCase):
-    """Tests for category slug validation in suggestions."""
+class TestValidateCategoryIds(unittest.TestCase):
+    """Tests for category term ID validation in suggestions.
+
+    Suggestion `cats` lists contain integer term IDs (see analyze.md), so
+    validation must compare against the set of valid term IDs, not slugs.
+    """
 
     def test_all_valid(self):
         suggestions = [
-            {'post_id': 1, 'cats': ['tech', 'food']},
-            {'post_id': 2, 'cats': ['art']},
+            {'post_id': 1, 'cats': [12, 34]},
+            {'post_id': 2, 'cats': [56]},
         ]
-        check = validate_category_slugs(suggestions, {'tech', 'food', 'art'})
+        check = validate_category_ids(suggestions, {12, 34, 56})
         self.assertTrue(check['valid'])
-        self.assertEqual(len(check['unknown_slugs']), 0)
+        self.assertEqual(len(check['unknown_ids']), 0)
 
-    def test_detects_unknown_slugs(self):
+    def test_detects_unknown_ids(self):
         suggestions = [
-            {'post_id': 1, 'cats': ['tech', 'bogus']},
-            {'post_id': 2, 'cats': ['bogus', 'also-fake']},
+            {'post_id': 1, 'cats': [12, 999]},
+            {'post_id': 2, 'cats': [999, 888]},
         ]
-        check = validate_category_slugs(suggestions, {'tech', 'food'})
+        check = validate_category_ids(suggestions, {12, 34})
         self.assertFalse(check['valid'])
-        self.assertEqual(check['unknown_slugs']['bogus'], 2)
-        self.assertEqual(check['unknown_slugs']['also-fake'], 1)
+        self.assertEqual(check['unknown_ids'][999], 2)
+        self.assertEqual(check['unknown_ids'][888], 1)
+
+    def test_real_pipeline_shape_passes(self):
+        """Regression: integer cats validated against a set of integer term
+        IDs must pass. The old slug-based check flagged every real ID as
+        unknown because it compared ints to slug strings."""
+        categories = [
+            {'term_id': 12, 'slug': 'tech'},
+            {'term_id': 34, 'slug': 'food'},
+        ]
+        valid_ids = {cat['term_id'] for cat in categories}
+        suggestions = [{'post_id': 1, 'cats': [12, 34]}]
+        check = validate_category_ids(suggestions, valid_ids)
+        self.assertTrue(check['valid'], check['errors'])
 
     def test_empty_suggestions(self):
-        check = validate_category_slugs([], {'tech'})
+        check = validate_category_ids([], {12})
         self.assertTrue(check['valid'])
 
     def test_empty_cats(self):
         suggestions = [{'post_id': 1, 'cats': []}]
-        check = validate_category_slugs(suggestions, {'tech'})
+        check = validate_category_ids(suggestions, {12})
         self.assertTrue(check['valid'])
 
 

@@ -204,18 +204,23 @@ if not check['valid']:
 
 This catches a known failure mode where an analyze agent outputs array indices (0, 1, 2, …) instead of real WordPress post IDs. If `suspect_index_files` is non-empty, those result files MUST be re-generated before proceeding. Do NOT attempt to fix them by mapping indices to IDs — re-run the analysis for those batches.
 
-### 2. Category slug validation
+### 2. Category term ID validation
+
+Suggestions carry integer `term_id`s in their `cats` list (see
+`agents/analyze.md`), so validate them against the set of valid term IDs —
+not slugs.
 
 ```python
-from helpers import validate_category_slugs
-valid_slugs = {cat['slug'] for cat in categories}
-check = validate_category_slugs(all_suggestions, valid_slugs)
+from helpers import validate_category_ids
+valid_ids = {cat['term_id'] for cat in categories}
+check = validate_category_ids(all_suggestions, valid_ids)
 if not check['valid']:
     for error in check['errors']:
         print(error)
 ```
 
-Any unknown slugs must be resolved (typo, or a new category the user hasn't approved yet) before applying.
+Any unknown term IDs must be resolved (a stale ID from a re-exported
+taxonomy, or a new category the user hasn't approved yet) before applying.
 
 ### 3. Category distribution review
 
