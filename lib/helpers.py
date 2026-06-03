@@ -543,6 +543,10 @@ def validate_result_ids(results_dir, batch_dir):
     for filename in sorted(os.listdir(batch_dir)):
         if not (filename.startswith('batch-') and filename.endswith('.json')):
             continue
+        # write_batches() drops a dict-shaped batch-manifest.json in the
+        # same directory; it is not a post list, so skip it.
+        if filename == 'batch-manifest.json':
+            continue
         with open(os.path.join(batch_dir, filename)) as f:
             for post in json.load(f):
                 pid = post.get('post_id')
