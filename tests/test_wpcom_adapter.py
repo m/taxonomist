@@ -879,6 +879,23 @@ class TestGetDefaultCategory(unittest.TestCase):
             adapter.get_default_category()
 
 
+class TestGetCategoryById(unittest.TestCase):
+    """Tests for category lookup by term ID."""
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_matches_string_id_from_api(self, mock_urlopen):
+        """WP.com may return category IDs as strings; an int term_id must
+        still match a string '49' rather than spuriously 404ing mid-apply."""
+        cat = {'ID': '49', 'name': 'Tech', 'slug': 'tech', 'parent': 0}
+        mock_urlopen.return_value = _mock_response({
+            'found': 1, 'categories': [cat],
+        })
+        adapter = WpcomAdapter(VALID_CONFIG)
+        result = adapter._get_category_by_id(49)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['slug'], 'tech')
+
+
 class TestBackup(unittest.TestCase):
     """Tests for full taxonomy backup.
 

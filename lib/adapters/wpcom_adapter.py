@@ -264,7 +264,17 @@ class WpcomAdapter:
         return None
 
     def _get_category_by_id(self, term_id):
-        return self._find_category(lambda c: c.get('ID') == term_id)
+        # WP.com sometimes returns IDs as strings; compare as ints so an
+        # int term_id still matches a string '49' (and vice versa).
+        def matches(c):
+            cid = c.get('ID')
+            if cid is None:
+                return False
+            try:
+                return int(cid) == int(term_id)
+            except (TypeError, ValueError):
+                return False
+        return self._find_category(matches)
 
     def _lookup_category_by_slug(self, slug):
         if not slug:
