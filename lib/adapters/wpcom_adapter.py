@@ -1617,8 +1617,13 @@ class WpcomAdapter:
                                 f'Category slug "{s}" missing during restore',
                             )
                         ids.append(int(live['ID']))
-                    if ids:
-                        self.set_post_categories(int(post_id), ids)
+                    # Posts that had no categories at backup time must be
+                    # cleared back to empty (allow_clear), otherwise a
+                    # category the apply run added is left in place and the
+                    # snapshot no longer matches the backup.
+                    self.set_post_categories(
+                        int(post_id), ids, allow_clear=True,
+                    )
                     if restore_log_path:
                         self._log_restore_op(
                             restore_log_path, op, status='ok',

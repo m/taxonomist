@@ -1480,6 +1480,27 @@ class TestRestoreFromSnapshot(unittest.TestCase):
         self.assertTrue(result['dry_run'])
         self.assertEqual(set(adapter.cats.keys()), cats_before)
 
+    def test_restores_post_that_had_no_categories(self):
+        """A post with zero categories at backup time must be cleared
+        back to zero on restore, not silently left with whatever the
+        apply run added. Mirrors restore.php's unconditional empty set."""
+        posts = {
+            123: {'ID': 123, 'title': 'Hello', 'categories': {}},
+        }
+        adapter = FakeWpcom(cats=_make_cats(), posts=posts)
+        adapter.backup(self.backup)
+
+        # Simulate the apply run adding a category to the post.
+        adapter.set_post_categories(123, [2])
+        self.assertEqual(list(adapter.posts[123]['categories'].keys()), ['Tech'])
+
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=False,
+        )
+        self.assertFalse(result['errors'])
+        # The added category must be gone — back to the empty backup state.
+        self.assertEqual(adapter.posts[123]['categories'], {})
+
 
 class TestRestoreAutoMode(unittest.TestCase):
     """Tests for mode=auto fallback behavior."""
