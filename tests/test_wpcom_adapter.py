@@ -1324,6 +1324,22 @@ class TestLogging(unittest.TestCase):
             adapter.set_post_categories(123, [2])
         self.assertIn('old_category_ids is required', str(ctx.exception))
 
+    def test_set_post_categories_accepts_empty_old_ids(self):
+        """A post that had zero categories before apply must be loggable:
+        old_category_ids=[] means 'had none', which is different from None
+        ('caller forgot to pass it')."""
+        adapter = FakeWpcom(cats=_make_cats(),
+                            posts={123: {'ID': 123, 'title': 'Hello',
+                                         'categories': {}}})
+        adapter.set_logging(changes_log_path=self.changes)
+        # Must not raise.
+        adapter.set_post_categories(
+            123, [2], old_category_ids=[], post_title='Hello',
+        )
+        from helpers import parse_change_log
+        rows = parse_change_log(self.changes)
+        self.assertEqual(rows[0]['old_categories'], '')
+
     def test_set_default_logs(self):
         adapter = FakeWpcom(cats=_make_cats())
         adapter.set_logging(terms_log_path=self.terms)
@@ -1371,6 +1387,35 @@ class TestRestoreFromLogs(unittest.TestCase):
             dry_run=False,
         )
         return adapter, result
+
+    def test_reverts_post_that_had_no_categories(self):
+        """Inverse-replay must clear a post back to zero categories when
+        its logged old state was empty, instead of raising ValueError
+        (which the empty-list guard would otherwise trigger)."""
+        adapter = FakeWpcom(
+            cats=_make_cats(),
+            posts={123: {'ID': 123, 'title': 'Hello', 'categories': {}}},
+        )
+        adapter.backup(self.backup)
+        adapter.set_logging(self.changes, self.terms)
+        # Apply adds a category to a previously-uncategorized post.
+        adapter.set_post_categories(
+            123, [2], old_category_ids=[], post_title='Hello',
+        )
+        self.assertEqual(
+            list(adapter.posts[123]['categories'].keys()), ['Tech'],
+        )
+
+        adapter.set_logging()
+        result = adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            mode=MODE_LOGS, dry_run=False,
+        )
+        self.assertFalse(result['errors'])
+        # The added category must be gone — back to the empty pre-apply state.
+        self.assertEqual(adapter.posts[123]['categories'], {})
 
     def test_round_trip(self):
         """Apply + revert should recover the baseline exactly."""

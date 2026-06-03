@@ -534,7 +534,10 @@ class WpcomAdapter:
         names = [self._resolve_id_to_name(cid) for cid in category_ids]
 
         old_names = []
-        if self.changes_log_path and not old_category_ids:
+        # Distinguish "not provided" (None → unrevertable log row) from
+        # "provided, but the post had no categories" ([] → a valid empty
+        # old state). Only None is an error.
+        if self.changes_log_path and old_category_ids is None:
             raise ValueError(
                 f'set_post_categories(post_id={post_id}): '
                 'old_category_ids is required when logging is enabled. '
@@ -1303,7 +1306,10 @@ class WpcomAdapter:
                         f'"{name}" no longer exists',
                     )
                 ids.append(cat['ID'])
-            self.set_post_categories(post_id, ids)
+            # An empty old state means the post had no categories before the
+            # apply run; allow_clear lets us restore it to that empty state
+            # instead of tripping the empty-list guard.
+            self.set_post_categories(post_id, ids, allow_clear=True)
             return op
 
         if source == SOURCE_TERM and action == ACTION_CREATE_CAT:
