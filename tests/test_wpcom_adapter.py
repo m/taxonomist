@@ -611,6 +611,37 @@ class TestSetPostCategories(unittest.TestCase):
         self.assertIn('dropped=[2]', str(ctx.exception))
 
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_empty_list_raises_without_allow_clear(self, mock_urlopen):
+        """An empty cats list is a bug, not a pass-through (apply.md).
+
+        Sending `categories_by_id: []` wipes the post's categories and
+        WordPress reassigns it to the default. The adapter must refuse an
+        empty list unless the caller explicitly opts into clearing, and
+        must not issue any HTTP request when it refuses.
+        """
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(ValueError):
+            adapter.set_post_categories(100, [])
+        mock_urlopen.assert_not_called()
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_empty_list_allowed_with_allow_clear(self, mock_urlopen):
+        """allow_clear=True is the sanctioned way to intentionally clear
+        a post's categories (used by snapshot restore)."""
+        mock_urlopen.return_value = _mock_response({
+            'ID': 100,
+            'terms': {'category': {}},
+        })
+        adapter = WpcomAdapter(VALID_CONFIG)
+        # Must not raise.
+        adapter.set_post_categories(100, [], allow_clear=True)
+
+        req = mock_urlopen.call_args_list[0][0][0]
+        self.assertIn('/rest/v1.2/', req.full_url)
+        body = json.loads(req.data.decode('utf-8'))
+        self.assertEqual(body, {'categories_by_id': []})
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
     def test_accepts_legacy_categories_response_shape(self, mock_urlopen):
         """Fallback: some responses key category info under `categories`
         (name-keyed hash) instead of `terms.category` (slug-keyed)."""

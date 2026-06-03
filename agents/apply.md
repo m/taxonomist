@@ -150,7 +150,9 @@ names drift when a category is renamed upstream of the call.
   reassigns the post to the site's default category (e.g. `Uncategorized`).
   Never send an empty array unless you explicitly intend to clear.
   Taxonomist should treat an empty `cats` list from analysis as a bug,
-  not a pass-through.
+  not a pass-through. `WpcomAdapter.set_post_categories()` enforces this:
+  it raises `ValueError` on an empty list unless you pass
+  `allow_clear=True` (reserved for intentional clears such as restore).
 - **Unknown IDs are silently dropped, not errored.** If you send
   `{"categories_by_id": [1030, 999999999]}`, the API returns HTTP 200
   and applies only the IDs that exist (`[1030]` in this example). There

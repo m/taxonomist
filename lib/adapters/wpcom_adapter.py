@@ -463,7 +463,8 @@ class WpcomAdapter:
             json.dump(all_posts, f, ensure_ascii=False)
 
     def set_post_categories(self, post_id, category_ids,
-                            old_category_ids=None, post_title=''):
+                            old_category_ids=None, post_title='',
+                            allow_clear=False):
         """
         Set categories for a post by term IDs.
 
@@ -482,14 +483,22 @@ class WpcomAdapter:
                 we never spend an extra GET to recover it. When logging
                 is off this argument is ignored.
             post_title: Optional title for the log row (display only).
+            allow_clear: When False (default), an empty category_ids list
+                raises ValueError. WP.com treats `categories_by_id: []` as
+                a wipe (the post falls back to the site default), and an
+                empty list from analysis is a bug, not a pass-through (see
+                agents/apply.md). Set True only when intentionally clearing
+                a post (e.g. snapshot restore reverting a post that had no
+                categories at backup time).
 
         Raises:
             WpcomApiError: If any category ID is not found in the
                 local cache, or if the API silently drops one of the
                 submitted IDs (a known `categories_by_id` silent
                 failure mode — see PR #10).
-            ValueError: If logging is enabled but old_category_ids is
-                not supplied (would produce an unrevertable log row).
+            ValueError: If category_ids is empty and allow_clear is False,
+                or if logging is enabled but old_category_ids is not
+                supplied (would produce an unrevertable log row).
         """
         # Normalize, then resolve every ID to its name. _resolve_id_to_name
         # raises 404 for unknown IDs, which doubles as the local validation
@@ -497,6 +506,17 @@ class WpcomAdapter:
         # silently drops unknown IDs, so catching them locally turns a
         # silent failure into a loud one.
         category_ids = [int(cid) for cid in category_ids]
+        # An empty list wipes the post's categories. Refuse it unless the
+        # caller explicitly opts in, so a stray empty `cats` from analysis
+        # can't silently strip a post down to the default category.
+        if not category_ids and not allow_clear:
+            raise ValueError(
+                f'set_post_categories(post_id={post_id}): refusing to set '
+                'an empty category list. WordPress.com treats this as a '
+                'wipe (the post falls back to the site default). An empty '
+                'list from analysis is a bug; pass allow_clear=True only '
+                'when you intend to clear the post.'
+            )
         names = [self._resolve_id_to_name(cid) for cid in category_ids]
 
         old_names = []
