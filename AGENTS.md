@@ -111,6 +111,14 @@ Key endpoints:
 - `POST /sites/$site/categories/slug:$slug` — update category
 - `POST /sites/$site/categories/slug:$slug/delete` — delete category
 
+Note: `categories/new` on WordPress.com behaves differently from WP-CLI in
+two ways (verified empirically). It **ignores the requested `slug`** and
+derives the slug from the name, so read the slug back from the response
+rather than assuming the one you sent. And it **rejects a duplicate display
+name** at the same level with a 400 ("A taxonomy with that name already
+exists"), where WP-CLI would allow two same-named categories under distinct
+slugs.
+
 Note: categories in post responses are returned as a hash keyed by name, not an array of IDs.
 Use exported `term_id` values as the canonical category identifier throughout
 analysis and apply. For category updates or deletes, resolve the exact
