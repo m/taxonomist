@@ -738,24 +738,26 @@ class TestExportPosts(unittest.TestCase):
         finally:
             os.unlink(output_path)
 
+    def _post(self, pid):
+        return {
+            'ID': pid, 'title': f'P{pid}', 'content': '', 'date': '',
+            'categories': {}, 'URL': '',
+        }
+
     @patch('adapters.wpcom_adapter.urllib.request.urlopen')
-    def test_pagination(self, mock_urlopen):
-        post1 = {
-            'ID': 1, 'title': 'P1', 'content': '', 'date': '',
-            'categories': {}, 'URL': '',
-        }
-        post2 = {
-            'ID': 2, 'title': 'P2', 'content': '', 'date': '',
-            'categories': {}, 'URL': '',
-        }
+    def test_pagination_does_not_rely_on_next_page(self, mock_urlopen):
+        """Regression: the v1.1 posts endpoint does not return
+        meta.next_page (see backup() comment), so a page_handle loop
+        truncates to the first 100 posts. Export must paginate by offset
+        and keep going even when meta is empty."""
         mock_urlopen.side_effect = [
-            _mock_response({
-                'found': 2, 'posts': [post1],
-                'meta': {'next_page': 'cursor123'},
-            }),
-            _mock_response({
-                'found': 2, 'posts': [post2], 'meta': {},
-            }),
+            # Two full pages, neither carrying meta.next_page.
+            _mock_response({'found': 4, 'posts': [self._post(1), self._post(2)],
+                            'meta': {}}),
+            _mock_response({'found': 4, 'posts': [self._post(3), self._post(4)],
+                            'meta': {}}),
+            # Empty page terminates the loop.
+            _mock_response({'found': 4, 'posts': [], 'meta': {}}),
         ]
         adapter = WpcomAdapter(VALID_CONFIG)
 
@@ -765,7 +767,37 @@ class TestExportPosts(unittest.TestCase):
             adapter.export_posts(output_path)
             with open(output_path) as f:
                 exported = json.load(f)
-            self.assertEqual(len(exported), 2)
+            self.assertEqual([p['post_id'] for p in exported], [1, 2, 3, 4])
+            # Pagination must walk offsets and must never send page_handle.
+            offsets = [
+                c[0][0].full_url for c in mock_urlopen.call_args_list
+            ]
+            self.assertTrue(any('offset=100' in u for u in offsets))
+            self.assertFalse(any('page_handle' in u for u in offsets))
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_pagination_dedupes_boundary_duplicates(self, mock_urlopen):
+        """Offset pagination can return a row twice at a page boundary if
+        the underlying set shifts. Export must dedupe, like backup()."""
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 3, 'posts': [self._post(1), self._post(2)],
+                            'meta': {}}),
+            # post2 repeats at the boundary; post3 is new.
+            _mock_response({'found': 3, 'posts': [self._post(2), self._post(3)],
+                            'meta': {}}),
+            _mock_response({'found': 3, 'posts': [], 'meta': {}}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.export_posts(output_path)
+            with open(output_path) as f:
+                exported = json.load(f)
+            self.assertEqual([p['post_id'] for p in exported], [1, 2, 3])
         finally:
             os.unlink(output_path)
 

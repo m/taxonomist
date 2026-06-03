@@ -413,27 +413,40 @@ class WpcomAdapter:
         """
         Export all published posts with categories to a JSON file.
 
-        Uses page_handle cursor pagination. Normalizes category hashes
-        to lists.
+        Uses offset pagination with dedupe. The v1.1 posts endpoint does
+        not return `meta.next_page` (see backup()), so a page_handle loop
+        silently truncates to the first 100 posts; offset is the shape the
+        endpoint actually supports. Normalizes category hashes to lists.
 
         Args:
             output_path: Path to write the JSON file.
         """
         all_posts = []
-        page_handle = None
+        seen_ids = set()
+        offset = 0
 
         while True:
-            params = {
+            resp = self._get(f'/sites/{self.site_id}/posts', params={
                 'number': 100,
+                'offset': offset,
                 'status': 'publish',
-                'fields': 'ID,title,content,date,categories',
-            }
-            if page_handle:
-                params['page_handle'] = page_handle
-            resp = self._get(f'/sites/{self.site_id}/posts', params=params)
-            posts = resp.get('posts', [])
+                'fields': 'ID,title,content,date,categories,URL',
+            })
+            posts = resp.get('posts') or []
+            if not posts:
+                break
 
+            new_in_batch = 0
             for post in posts:
+                post_id = post['ID']
+                # Offset pagination can return duplicates at page
+                # boundaries if the underlying query shifts between
+                # calls. Dedupe so the export stays stable.
+                if post_id in seen_ids:
+                    continue
+                seen_ids.add(post_id)
+                new_in_batch += 1
+
                 # Normalize categories from {name: {ID: ...}} hash to list.
                 cat_hash = post.get('categories') or {}
                 cat_names = list(cat_hash.keys())
@@ -446,7 +459,7 @@ class WpcomAdapter:
                 content = re.sub(r'\s+', ' ', content).strip()
 
                 all_posts.append({
-                    'post_id': post['ID'],
+                    'post_id': post_id,
                     'title': post.get('title', ''),
                     'date': post.get('date', ''),
                     'content': content,
@@ -456,10 +469,9 @@ class WpcomAdapter:
                     'url': post.get('URL', ''),
                 })
 
-            meta = resp.get('meta', {})
-            page_handle = meta.get('next_page')
-            if not page_handle or not posts:
+            if new_in_batch == 0:
                 break
+            offset += 100
 
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(all_posts, f, ensure_ascii=False)
