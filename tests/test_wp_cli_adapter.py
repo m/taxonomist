@@ -98,5 +98,26 @@ class TestCreateCategoryInjection(unittest.TestCase):
         self.assertIn('--slug=tech', argv)
 
 
+class TestSetPostCategories(unittest.TestCase):
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_uses_by_id_and_separate_args(self, mock_run):
+        """Term IDs must be passed as separate positional args with
+        --by=id. Comma-joining them ('5,7') makes wp treat the value as a
+        single slug, not find it, and silently CREATE a junk category named
+        after the value (verified live: setting [390] created a category
+        named '390')."""
+        mock_run.return_value = _ok_run()
+        adapter = WpCliAdapter(_local_config())
+        adapter.set_post_categories(123, [5, 7])
+        argv = mock_run.call_args[0][0]
+        self.assertIn('--by=id', argv)
+        self.assertIn('5', argv)
+        self.assertIn('7', argv)
+        # The buggy version passed a single comma-joined '5,7' token.
+        self.assertNotIn('5,7', argv)
+        # Term values must come after the 'category' taxonomy positional.
+        self.assertEqual(argv[-3:], ['5', '7', '--by=id'])
+
+
 if __name__ == '__main__':
     unittest.main()
