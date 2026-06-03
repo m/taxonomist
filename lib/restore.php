@@ -163,7 +163,7 @@ foreach ( $backup['categories'] as $category ) {
 		$current_term->slug !== $category['slug']
 	);
 	if ( $needs_fix ) {
-		wp_update_term(
+		$update_result = wp_update_term(
 			$current_id,
 			'category',
 			array(
@@ -172,7 +172,14 @@ foreach ( $backup['categories'] as $category ) {
 				'slug'   => $category['slug'],
 			)
 		);
-		++$hierarchy_fixed;
+		// A slug/name restore can hit its own collision (another live term
+		// already holds the target slug). Surface it instead of silently
+		// leaving the category stuck with the temporary '-taxonomist-…' slug.
+		if ( is_wp_error( $update_result ) ) {
+			WP_CLI::warning( "Failed to restore name/slug/parent for category '$slug': " . $update_result->get_error_message() );
+		} else {
+			++$hierarchy_fixed;
+		}
 	}
 }
 
