@@ -9,6 +9,7 @@ _request() with an in-memory category/post store so the restore logic
 can be exercised end-to-end without complex mock response choreography.
 """
 
+import csv
 import io
 import json
 import os
@@ -22,9 +23,13 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
 from adapters.wpcom_adapter import (
     ACTION_CREATE_CAT,
+    ACTION_CREATE_TAG,
     ACTION_DELETE_CAT,
+    ACTION_DELETE_TAG,
     ACTION_SET_CATS,
     ACTION_SET_DEFAULT,
+    ACTION_SET_TAGS,
+    ACTION_UPDATE_TAG,
     MODE_LOGS,
     MODE_SNAPSHOT,
     PartialRestoreError,
@@ -51,6 +56,12 @@ def _mock_response(data, status=200):
     resp.__enter__ = lambda s: s
     resp.__exit__ = MagicMock(return_value=False)
     return resp
+
+
+def _http_error(status, error, message):
+    """Build an HTTPError with a JSON body, as _request() expects."""
+    body = json.dumps({'error': error, 'message': message}).encode()
+    return urllib.error.HTTPError('url', status, error, {}, io.BytesIO(body))
 
 
 class TestWpUrlencode(unittest.TestCase):
@@ -917,6 +928,8 @@ class TestBackup(unittest.TestCase):
         mock_urlopen.side_effect = [
             # list_categories
             _mock_response({'found': 1, 'categories': [cat]}),
+            # list_tags
+            _mock_response({'found': 0, 'tags': []}),
             # posts offset=0 — one post
             _mock_response({'found': 1, 'posts': [post]}),
             # posts offset=100 — empty, loop exits
@@ -939,6 +952,8 @@ class TestBackup(unittest.TestCase):
             self.assertEqual(backup['default_category_slug'], 'tech')
             self.assertEqual(backup['categories'][0]['term_id'], 1)
             self.assertEqual(backup['post_categories'][0]['post_id'], 100)
+            self.assertEqual(backup['total_tags'], 0)
+            self.assertEqual(backup['tags'], [])
         finally:
             os.unlink(output_path)
 
@@ -967,6 +982,8 @@ class TestBackup(unittest.TestCase):
         mock_urlopen.side_effect = [
             # list_categories
             _mock_response({'found': 1, 'categories': [cat]}),
+            # list_tags
+            _mock_response({'found': 0, 'tags': []}),
             # posts offset=0 — 100 posts
             _mock_response({'found': 250, 'posts': _page(1, 100)}),
             # posts offset=100 — 100 posts
@@ -1007,6 +1024,7 @@ class TestBackup(unittest.TestCase):
         }
         mock_urlopen.side_effect = [
             _mock_response({'found': 1, 'categories': [cat]}),
+            _mock_response({'found': 0, 'tags': []}),
             _mock_response({'found': 1, 'posts': [post], 'meta': {}}),
             _mock_response({'found': 1, 'posts': [], 'meta': {}}),
             # settings present but missing default_category
@@ -1050,6 +1068,8 @@ class TestBackup(unittest.TestCase):
         mock_urlopen.side_effect = [
             # list_categories
             _mock_response({'found': 1, 'categories': [cat]}),
+            # list_tags
+            _mock_response({'found': 0, 'tags': []}),
             # posts offset=0 — one post
             _mock_response({'found': 1, 'posts': [post], 'meta': {}}),
             # posts offset=100 — empty, loop exits
@@ -1082,6 +1102,7 @@ class TestBackup(unittest.TestCase):
                'description': '', 'post_count': 0}
         mock_urlopen.side_effect = [
             _mock_response({'found': 1, 'categories': [cat]}),
+            _mock_response({'found': 0, 'tags': []}),
             _mock_response({'found': 0, 'posts': []}),
             _mock_response({'default_category': 1}),
             _mock_response({'found': 1, 'categories': [cat]}),
@@ -1091,8 +1112,9 @@ class TestBackup(unittest.TestCase):
             output_path = f.name
         try:
             adapter.backup(output_path)
-            # Second call is the first posts page.
-            posts_url = mock_urlopen.call_args_list[1][0][0].full_url
+            # Third call (after list_categories, list_tags) is the first
+            # posts page.
+            posts_url = mock_urlopen.call_args_list[2][0][0].full_url
             self.assertIn('offset=0', posts_url)
             self.assertNotIn('page_handle', posts_url)
         finally:
@@ -1115,6 +1137,7 @@ class TestBackup(unittest.TestCase):
 
         mock_urlopen.side_effect = [
             _mock_response({'found': 1, 'categories': [cat]}),
+            _mock_response({'found': 0, 'tags': []}),
             # offset=0 — posts 1, 2, 3
             _mock_response({'found': 3, 'posts': [_post(1), _post(2), _post(3)]}),
             # offset=100 — same posts again (simulates shifted query).
@@ -1190,6 +1213,11 @@ class FakeWpcom(WpcomAdapter):
                 'categories': list(self.cats.values()),
                 'found': len(self.cats),
             }
+        if path.endswith('/tags'):
+            # No restore test exercises tag state yet — stubbed empty so
+            # backup()'s unconditional list_tags() call doesn't blow up
+            # every category-only restore test.
+            return {'tags': [], 'found': 0}
         if path.endswith('/categories/new'):
             tid = self.next_id
             self.next_id += 1
@@ -1920,6 +1948,488 @@ class TestReadBackVerification(unittest.TestCase):
         # No verification keys should appear on ops.
         for op in result['operations']:
             self.assertNotIn('verification', op)
+
+
+# --- Tag support ---
+#
+# Mirrors the category test coverage above. Where a behavior is identical
+# to its category counterpart (pagination, drift detection, verify-after-
+# write, duplicate-slug v2 fallback), the test is a straight mirror; where
+# tags differ from categories (no parent, no default, allow_clear default),
+# the test asserts the difference explicitly.
+
+class TestListTags(unittest.TestCase):
+    """Tests for tag listing — mirrors TestListCategories-equivalent coverage."""
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_single_page(self, mock_urlopen):
+        tags = [
+            {'ID': 1, 'name': 'wordpress', 'slug': 'wordpress',
+             'description': '', 'post_count': 5},
+        ]
+        mock_urlopen.return_value = _mock_response({
+            'found': 1, 'tags': tags,
+        })
+        adapter = WpcomAdapter(VALID_CONFIG)
+        result = adapter.list_tags()
+        self.assertEqual(result, tags)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_pagination(self, mock_urlopen):
+        page1 = [{'ID': i, 'name': f't{i}', 'slug': f't{i}',
+                  'description': '', 'post_count': 1} for i in range(1000)]
+        page2 = [{'ID': 1000, 'name': 't1000', 'slug': 't1000',
+                  'description': '', 'post_count': 1}]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1001, 'tags': page1}),
+            _mock_response({'found': 1001, 'tags': page2}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        result = adapter.list_tags()
+        self.assertEqual(len(result), 1001)
+
+
+class TestSetPostTags(unittest.TestCase):
+    """Tests for setting post tags via tags_by_id."""
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_posts_tags_by_id_to_v1_2(self, mock_urlopen):
+        """Verify the request shape: v1.2 URL + JSON body + integer IDs."""
+        tags = [
+            {'ID': 1, 'name': 'wordpress', 'slug': 'wordpress'},
+            {'ID': 2, 'name': 'ai', 'slug': 'ai'},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'tags': tags}),
+            _mock_response({
+                'ID': 100,
+                'terms': {'post_tag': {
+                    'wordpress': {'ID': 1, 'slug': 'wordpress'},
+                    'ai': {'ID': 2, 'slug': 'ai'},
+                }},
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.set_post_tags(100, [1, 2])
+
+        post_call = mock_urlopen.call_args_list[1]
+        req = post_call[0][0]
+        self.assertIn('/rest/v1.2/', req.full_url)
+        body = json.loads(req.data.decode('utf-8'))
+        self.assertEqual(body, {'tags_by_id': [1, 2]})
+        self.assertEqual(req.get_header('Content-type'), 'application/json')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_empty_list_allowed_by_default(self, mock_urlopen):
+        """Unlike categories, an empty tag list is fine without allow_clear.
+
+        A post with zero tags is a normal state in WordPress — there's no
+        default-tag fallback to accidentally trigger, unlike categories.
+        """
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 0, 'tags': []}),
+            _mock_response({'ID': 100, 'terms': {'post_tag': {}}}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        # Must not raise, and no allow_clear kwarg needed.
+        adapter.set_post_tags(100, [])
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_unknown_id_raises_before_posting(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response({'found': 0, 'tags': []})
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.set_post_tags(100, [999])
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_raises_on_silent_drop_from_api(self, mock_urlopen):
+        tags = [
+            {'ID': 1, 'name': 'wordpress', 'slug': 'wordpress'},
+            {'ID': 2, 'name': 'ai', 'slug': 'ai'},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'tags': tags}),
+            # API returned only tag 1; tag 2 was silently dropped.
+            _mock_response({
+                'ID': 100,
+                'terms': {'post_tag': {
+                    'wordpress': {'ID': 1, 'slug': 'wordpress'},
+                }},
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.set_post_tags(100, [1, 2])
+        self.assertEqual(ctx.exception.error, 'tags_drift')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_logs_set_tags_with_slugs(self, mock_urlopen):
+        tags = [
+            {'ID': 1, 'name': 'wordpress', 'slug': 'wordpress'},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'tags': tags}),
+            _mock_response({
+                'ID': 100,
+                'terms': {'post_tag': {
+                    'wordpress': {'ID': 1, 'slug': 'wordpress'},
+                }},
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.TemporaryDirectory() as d:
+            changes_log = os.path.join(d, 'tag-changes.tsv')
+            adapter.set_logging(tag_changes_log_path=changes_log)
+            adapter.set_post_tags(
+                100, [1], old_tag_ids=[], post_title='Hello',
+            )
+            with open(changes_log) as f:
+                rows = list(csv.DictReader(f, delimiter='\t'))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['action'], ACTION_SET_TAGS)
+            self.assertEqual(rows[0]['new_tags'], 'wordpress')
+            self.assertEqual(rows[0]['new_tag_slugs'], 'wordpress')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_old_tag_ids_required_when_logging_enabled(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response({'found': 0, 'tags': []})
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.TemporaryDirectory() as d:
+            adapter.set_logging(
+                tag_changes_log_path=os.path.join(d, 'tag-changes.tsv'),
+            )
+            with self.assertRaises(ValueError):
+                adapter.set_post_tags(100, [])
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_reads_back_after_remote_request_timeout(self, mock_urlopen):
+        """A lost confirmation isn't a failure if the write landed anyway.
+
+        Same Jetpack relay timeout documented for categories in
+        taxonomist#43 — this is the identical failure mode on the same
+        underlying API, just for tags.
+        """
+        tags = [
+            {'ID': 1, 'name': 'wordpress', 'slug': 'wordpress'},
+            {'ID': 2, 'name': 'ai', 'slug': 'ai'},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'tags': tags}),
+            _http_error(
+                400, 'remote_request_timeout',
+                'The Jetpack site is inaccessible or returned an error: '
+                'Jetpack: [http_request_failed] cURL error 28: Operation '
+                'timed out after 30002 milliseconds with 0 bytes received',
+            ),
+            # Read-back: the write actually landed.
+            _mock_response({
+                'ID': 100,
+                'tags': {
+                    'wordpress': {'ID': 1, 'slug': 'wordpress'},
+                    'ai': {'ID': 2, 'slug': 'ai'},
+                },
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.set_post_tags(100, [1, 2])
+        self.assertEqual(mock_urlopen.call_count, 3)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_raises_when_readback_shows_write_did_not_land(self, mock_urlopen):
+        tags = [{'ID': 1, 'name': 'wordpress', 'slug': 'wordpress'}]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'tags': tags}),
+            _http_error(400, 'remote_request_timeout', 'timed out'),
+            # Read-back: the post still has no tags — the write never
+            # actually landed.
+            _mock_response({'ID': 100, 'tags': {}}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.set_post_tags(100, [1])
+        self.assertEqual(ctx.exception.error, 'tags_drift')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_non_timeout_error_is_never_read_back(self, mock_urlopen):
+        tags = [{'ID': 1, 'name': 'wordpress', 'slug': 'wordpress'}]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'tags': tags}),
+            _http_error(403, 'unauthorized', 'bad token'),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.set_post_tags(100, [1])
+        self.assertEqual(ctx.exception.error, 'unauthorized')
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+
+class TestCreateTag(unittest.TestCase):
+    """Tests for tag creation."""
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_creates_and_logs(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response({
+            'ID': 42, 'name': 'WordPress', 'slug': 'wordpress',
+            'description': '', 'post_count': 0,
+        })
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.TemporaryDirectory() as d:
+            terms_log = os.path.join(d, 'tag-terms.tsv')
+            adapter.set_logging(tag_terms_log_path=terms_log)
+            result = adapter.create_tag('WordPress', 'wordpress')
+            self.assertEqual(result['ID'], 42)
+            with open(terms_log) as f:
+                rows = list(csv.DictReader(f, delimiter='\t'))
+            self.assertEqual(rows[0]['action'], ACTION_CREATE_TAG)
+            self.assertEqual(rows[0]['term_id'], '42')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_no_parent_param_sent(self, mock_urlopen):
+        """Tags are flat — create_tag() takes no parent argument at all."""
+        mock_urlopen.return_value = _mock_response({
+            'ID': 42, 'name': 'X', 'slug': 'x',
+        })
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.create_tag('X', 'x')
+        req = mock_urlopen.call_args_list[0][0][0]
+        body = req.data.decode('utf-8')
+        self.assertNotIn('parent', body)
+
+
+class TestDeleteTag(unittest.TestCase):
+    """Tests for tag deletion."""
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_deletes_by_slug_and_logs(self, mock_urlopen):
+        tag = {'ID': 1, 'name': 'wordpress', 'slug': 'wordpress',
+               'description': '', 'post_count': 0}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'tags': [tag]}),
+            _mock_response({'success': True}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.TemporaryDirectory() as d:
+            terms_log = os.path.join(d, 'tag-terms.tsv')
+            adapter.set_logging(tag_terms_log_path=terms_log)
+            adapter.delete_tag(1)
+            with open(terms_log) as f:
+                rows = list(csv.DictReader(f, delimiter='\t'))
+            self.assertEqual(rows[0]['action'], ACTION_DELETE_TAG)
+            self.assertIn('"slug": "wordpress"', rows[0]['old_value'])
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_uses_v2_for_duplicate_slugs(self, mock_urlopen):
+        tags = [
+            {'ID': 1, 'name': 'Reviews', 'slug': 'reviews'},
+            {'ID': 2, 'name': 'reviews', 'slug': 'reviews'},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'tags': tags}),
+            _mock_response({'deleted': True}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.delete_tag(1)
+        v2_call = mock_urlopen.call_args_list[1]
+        self.assertIn('/wp/v2/', v2_call[0][0].full_url)
+        self.assertIn('/tags/1', v2_call[0][0].full_url)
+
+    def test_non_int_term_id_raises_type_error(self):
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(TypeError):
+            adapter.delete_tag('1')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_not_found_raises(self, mock_urlopen):
+        mock_urlopen.return_value = _mock_response({'found': 0, 'tags': []})
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.delete_tag(999)
+        self.assertEqual(ctx.exception.status_code, 404)
+
+
+class TestUpdateTag(unittest.TestCase):
+    """Tests for tag field updates."""
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_updates_description_and_logs(self, mock_urlopen):
+        tag = {'ID': 1, 'name': 'wordpress', 'slug': 'wordpress',
+               'description': ''}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'tags': [tag]}),  # cache
+            _mock_response({'found': 1}),  # pre-count
+            _mock_response({'ID': 1, 'name': 'wordpress',
+                            'slug': 'wordpress', 'description': 'new desc'}),
+            _mock_response({'found': 1}),  # post-count
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.TemporaryDirectory() as d:
+            terms_log = os.path.join(d, 'tag-terms.tsv')
+            adapter.set_logging(tag_terms_log_path=terms_log)
+            adapter.update_tag(1, {'description': 'new desc'})
+            with open(terms_log) as f:
+                rows = list(csv.DictReader(f, delimiter='\t'))
+            self.assertEqual(rows[0]['action'], ACTION_UPDATE_TAG)
+            self.assertEqual(rows[0]['field'], 'description')
+            self.assertEqual(rows[0]['new_value'], 'new desc')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_duplicate_detected_raises(self, mock_urlopen):
+        tag = {'ID': 1, 'name': 'wordpress', 'slug': 'wordpress'}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'tags': [tag]}),
+            _mock_response({'found': 1}),   # pre-count
+            _mock_response({'ID': 1, 'name': 'wordpress'}),
+            _mock_response({'found': 2}),   # post-count — a dupe appeared
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_tag(1, {'name': 'wordpress'})
+        self.assertEqual(ctx.exception.error, 'duplicate_detected')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_update_no_op_raises(self, mock_urlopen):
+        """The API silently ignoring the update must be a loud failure."""
+        tag = {'ID': 1, 'name': 'wordpress', 'slug': 'wordpress',
+               'description': 'old'}
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'tags': [tag]}),
+            _mock_response({'found': 1}),
+            # Response doesn't reflect the requested change.
+            _mock_response({'ID': 1, 'description': 'old'}),
+            _mock_response({'found': 1}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.update_tag(1, {'description': 'new'})
+        self.assertEqual(ctx.exception.error, 'update_no_op')
+
+
+class TestSetLoggingTags(unittest.TestCase):
+    """Tests for tag log path configuration."""
+
+    def test_defaults_to_none(self):
+        adapter = WpcomAdapter(VALID_CONFIG)
+        self.assertIsNone(adapter.tag_changes_log_path)
+        self.assertIsNone(adapter.tag_terms_log_path)
+
+    def test_set_logging_accepts_tag_paths(self):
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.set_logging(
+            changes_log_path='c.tsv', terms_log_path='t.tsv',
+            tag_changes_log_path='tc.tsv', tag_terms_log_path='tt.tsv',
+        )
+        self.assertEqual(adapter.tag_changes_log_path, 'tc.tsv')
+        self.assertEqual(adapter.tag_terms_log_path, 'tt.tsv')
+        # Category paths are unaffected by the new kwargs.
+        self.assertEqual(adapter.changes_log_path, 'c.tsv')
+        self.assertEqual(adapter.terms_log_path, 't.tsv')
+
+    def test_logging_suspended_covers_tag_paths(self):
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.set_logging(
+            tag_changes_log_path='tc.tsv', tag_terms_log_path='tt.tsv',
+        )
+        with adapter._logging_suspended():
+            self.assertIsNone(adapter.tag_changes_log_path)
+            self.assertIsNone(adapter.tag_terms_log_path)
+        self.assertEqual(adapter.tag_changes_log_path, 'tc.tsv')
+        self.assertEqual(adapter.tag_terms_log_path, 'tt.tsv')
+
+
+class TestExportPostsTags(unittest.TestCase):
+    """Tests that export_posts() captures tags alongside categories."""
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_normalizes_tag_hash(self, mock_urlopen):
+        post = {
+            'ID': 1,
+            'title': 'Test',
+            'content': 'Body',
+            'date': '2024-01-01',
+            'categories': {},
+            'tags': {
+                'wordpress': {'ID': 10, 'slug': 'wordpress'},
+                'ai': {'ID': 20, 'slug': 'ai'},
+            },
+            'URL': 'https://example.com/test',
+        }
+        mock_urlopen.return_value = _mock_response({
+            'found': 1, 'posts': [post], 'meta': {},
+        })
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.export_posts(output_path)
+            with open(output_path) as f:
+                exported = json.load(f)
+            self.assertIn('wordpress', exported[0]['tags'])
+            self.assertEqual(sorted(exported[0]['tag_ids']), [10, 20])
+            self.assertIn('ai', exported[0]['tag_slugs'])
+        finally:
+            os.unlink(output_path)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_post_with_no_tags_gets_empty_lists(self, mock_urlopen):
+        post = {
+            'ID': 1, 'title': 'Test', 'content': 'Body',
+            'date': '2024-01-01', 'categories': {}, 'URL': '',
+            # No 'tags' key at all.
+        }
+        mock_urlopen.return_value = _mock_response({
+            'found': 1, 'posts': [post], 'meta': {},
+        })
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.export_posts(output_path)
+            with open(output_path) as f:
+                exported = json.load(f)
+            self.assertEqual(exported[0]['tags'], [])
+            self.assertEqual(exported[0]['tag_ids'], [])
+            self.assertEqual(exported[0]['tag_slugs'], [])
+        finally:
+            os.unlink(output_path)
+
+
+class TestBackupTags(unittest.TestCase):
+    """Tests that backup() captures tags and post_tags."""
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_backup_includes_tags_and_post_tags(self, mock_urlopen):
+        cat = {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': '', 'post_count': 1}
+        tag = {'ID': 10, 'name': 'wordpress', 'slug': 'wordpress',
+               'description': '', 'post_count': 1}
+        post = {
+            'ID': 100, 'title': 'Test',
+            'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+            'tags': {'wordpress': {'ID': 10, 'slug': 'wordpress'}},
+        }
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': [cat]}),
+            _mock_response({'found': 1, 'tags': [tag]}),
+            _mock_response({'found': 1, 'posts': [post]}),
+            _mock_response({'found': 1, 'posts': []}),
+            _mock_response({'default_category': 1}),
+            _mock_response({'found': 1, 'categories': [cat]}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+            output_path = f.name
+        try:
+            adapter.backup(output_path)
+            with open(output_path) as f:
+                backup = json.load(f)
+            self.assertEqual(backup['total_tags'], 1)
+            self.assertEqual(backup['tags'][0]['term_id'], 10)
+            self.assertEqual(backup['tags'][0]['slug'], 'wordpress')
+            self.assertEqual(backup['post_tags'][0]['post_id'], 100)
+            self.assertEqual(backup['post_tags'][0]['tag_ids'], [10])
+        finally:
+            os.unlink(output_path)
 
 
 if __name__ == '__main__':

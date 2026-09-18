@@ -20,19 +20,24 @@ from urllib.parse import parse_qs, parse_qsl, unquote
 from helpers import (
     _detect_orphans,
     aggregate_results,
+    aggregate_tag_results,
     batch_manifest_path,
     calculate_batch_size,
     compute_batch_fingerprint,
     find_incomplete_batches,
+    find_similar_tags,
     parse_change_log,
     render_category_tree,
     resolve_category_export_row,
+    resolve_tag_export_row,
     split_into_batches,
     validate_backup,
     validate_category_ids,
     validate_export,
     validate_result_ids,
     validate_suggestions,
+    validate_tag_ids,
+    validate_tag_suggestions,
     wp_urlencode,
     write_batches,
 )
@@ -1475,6 +1480,233 @@ class TestDetectOrphans(unittest.TestCase):
         orphaned, counts = _detect_orphans(children_map, actions)
         self.assertIn('kid', orphaned)
         self.assertEqual(counts['source'], 1)
+
+
+# --- Tag support ---
+
+class TestAggregateTagResults(unittest.TestCase):
+    """Tests for combining per-batch tag-result files. Mirrors
+    TestAggregateResults exactly, against tag-result-NNN.json / 'tags' /
+    'new_tags' instead of result-NNN.json / 'cats' / 'new_cats'."""
+
+    def _write_result(self, tmpdir, name, data):
+        path = os.path.join(tmpdir, name)
+        with open(path, 'w') as f:
+            json.dump(data, f)
+
+    def test_combines_batches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_result(tmpdir, 'tag-result-000.json', [
+                {'post_id': 1, 'tags': [10], 'new_tags': []},
+                {'post_id': 2, 'tags': [20], 'new_tags': ['jazz']},
+            ])
+            self._write_result(tmpdir, 'tag-result-001.json', [
+                {'post_id': 3, 'tags': [10, 30], 'new_tags': []},
+            ])
+            result = aggregate_tag_results(tmpdir)
+            self.assertEqual(len(result['suggestions']), 3)
+            self.assertEqual(result['tag_counts'][10], 2)
+            self.assertEqual(result['tag_counts'][20], 1)
+            self.assertEqual(result['tag_counts'][30], 1)
+            self.assertEqual(result['new_tag_counts']['jazz'], 1)
+
+    def test_ignores_category_result_files(self):
+        """A tag-results directory must not pick up category result files
+        (or vice versa) — the filename prefixes must not overlap."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_result(tmpdir, 'tag-result-000.json', [
+                {'post_id': 1, 'tags': [10], 'new_tags': []},
+            ])
+            self._write_result(tmpdir, 'result-000.json', [
+                {'post_id': 99, 'cats': [99], 'new_cats': []},
+            ])
+            suggestions = aggregate_tag_results(tmpdir)['suggestions']
+            self.assertEqual(len(suggestions), 1)
+            self.assertEqual(suggestions[0]['post_id'], 1)
+
+    def test_dedupes_duplicate_post_ids(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_result(tmpdir, 'tag-result-000.json', [
+                {'post_id': 1, 'tags': [10], 'new_tags': []},
+            ])
+            self._write_result(tmpdir, 'tag-result-001.json', [
+                {'post_id': 1, 'tags': [30], 'new_tags': ['ml']},
+            ])
+            result = aggregate_tag_results(tmpdir)
+            self.assertEqual(len(result['suggestions']), 1)
+            self.assertEqual(result['suggestions'][0]['tags'], [30])
+            self.assertEqual(result['tag_counts'][30], 1)
+            self.assertNotIn(10, result['tag_counts'])
+
+    def test_empty_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = aggregate_tag_results(tmpdir)
+            self.assertEqual(len(result['suggestions']), 0)
+            self.assertEqual(len(result['tag_counts']), 0)
+
+
+class TestValidateTagSuggestions(unittest.TestCase):
+    """Tests for tag-suggestions format validation. Mirrors
+    TestValidateSuggestions against 'tags' / 'new_tags'."""
+
+    def test_valid(self):
+        result = validate_tag_suggestions([
+            {'post_id': 1, 'tags': [10, 20], 'new_tags': ['jazz']},
+        ])
+        self.assertTrue(result['valid'])
+
+    def test_missing_post_id(self):
+        result = validate_tag_suggestions([{'tags': [10]}])
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('missing "post_id"' in e for e in result['errors']))
+
+    def test_missing_tags(self):
+        result = validate_tag_suggestions([{'post_id': 1}])
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('missing "tags"' in e for e in result['errors']))
+
+    def test_tags_must_be_ints(self):
+        result = validate_tag_suggestions([{'post_id': 1, 'tags': ['10']}])
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('must contain only ints' in e for e in result['errors']))
+
+    def test_new_tags_must_be_strings(self):
+        result = validate_tag_suggestions([
+            {'post_id': 1, 'tags': [], 'new_tags': [123]},
+        ])
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('must contain only strings' in e for e in result['errors']))
+
+    def test_not_a_list(self):
+        result = validate_tag_suggestions({'post_id': 1})
+        self.assertFalse(result['valid'])
+
+
+class TestValidateTagIds(unittest.TestCase):
+    """Tests for tag term ID validation against the live tag set."""
+
+    def test_all_valid(self):
+        suggestions = [{'post_id': 1, 'tags': [10, 20]}]
+        result = validate_tag_ids(suggestions, {10, 20, 30})
+        self.assertTrue(result['valid'])
+
+    def test_unknown_id_flagged(self):
+        suggestions = [{'post_id': 1, 'tags': [10, 999]}]
+        result = validate_tag_ids(suggestions, {10, 20})
+        self.assertFalse(result['valid'])
+        self.assertEqual(result['unknown_ids'][999], 1)
+
+    def test_counts_repeated_unknown_ids(self):
+        suggestions = [
+            {'post_id': 1, 'tags': [999]},
+            {'post_id': 2, 'tags': [999]},
+        ]
+        result = validate_tag_ids(suggestions, {10})
+        self.assertEqual(result['unknown_ids'][999], 2)
+
+
+class TestResolveTagExportRow(unittest.TestCase):
+    """Tests for exact tag resolution from exported metadata. Mirrors
+    TestResolveCategoryExportRow."""
+
+    def setUp(self):
+        self.tags = [
+            {'term_id': 101, 'name': 'WordPress', 'slug': 'wordpress',
+             'description': '', 'count': 5},
+            {'term_id': 202, 'name': 'wordpress', 'slug': 'wordpress-2',
+             'description': '', 'count': 1},
+        ]
+
+    def test_resolves_by_term_id(self):
+        tag = resolve_tag_export_row(self.tags, term_id=101)
+        self.assertEqual(tag['slug'], 'wordpress')
+
+    def test_resolves_by_exact_slug(self):
+        tag = resolve_tag_export_row(self.tags, slug='wordpress-2')
+        self.assertEqual(tag['term_id'], 202)
+
+    def test_rejects_name_only_lookup(self):
+        with self.assertRaisesRegex(ValueError, 'name alone'):
+            resolve_tag_export_row(self.tags, name='WordPress')
+
+    def test_rejects_mismatched_term_id_and_slug(self):
+        with self.assertRaisesRegex(ValueError, 'different tags'):
+            resolve_tag_export_row(self.tags, term_id=101, slug='wordpress-2')
+
+    def test_unknown_term_id_raises_keyerror(self):
+        with self.assertRaises(KeyError):
+            resolve_tag_export_row(self.tags, term_id=999)
+
+    def test_neither_identifier_raises(self):
+        with self.assertRaisesRegex(ValueError, 'Provide term_id or slug'):
+            resolve_tag_export_row(self.tags)
+
+
+class TestFindSimilarTags(unittest.TestCase):
+    """Tests for the tag-fragmentation detector."""
+
+    def test_groups_case_variants(self):
+        tags = [
+            {'term_id': 1, 'name': 'WordPress'},
+            {'term_id': 2, 'name': 'wordpress'},
+            {'term_id': 3, 'name': 'Wordpress'},
+        ]
+        groups = find_similar_tags(tags)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual({t['term_id'] for t in groups[0]}, {1, 2, 3})
+
+    def test_groups_hyphen_and_space_variants(self):
+        tags = [
+            {'term_id': 1, 'name': 'word press'},
+            {'term_id': 2, 'name': 'word-press'},
+            {'term_id': 3, 'name': 'wordpress'},
+        ]
+        groups = find_similar_tags(tags)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0]), 3)
+
+    def test_groups_simple_plurals(self):
+        tags = [
+            {'term_id': 1, 'name': 'podcast'},
+            {'term_id': 2, 'name': 'podcasts'},
+        ]
+        groups = find_similar_tags(tags)
+        self.assertEqual(len(groups), 1)
+
+    def test_short_acronyms_not_mangled_by_plural_stripping(self):
+        """'aws' (3 chars) must not be stripped to 'aw' and collide with
+        an unrelated tag that happens to normalize to 'aw'."""
+        tags = [
+            {'term_id': 1, 'name': 'aws'},
+            {'term_id': 2, 'name': 'aw'},
+        ]
+        groups = find_similar_tags(tags)
+        self.assertEqual(len(groups), 0)
+
+    def test_unrelated_tags_not_grouped(self):
+        tags = [
+            {'term_id': 1, 'name': 'fitness'},
+            {'term_id': 2, 'name': 'puzzles'},
+            {'term_id': 3, 'name': 'wordpress'},
+        ]
+        self.assertEqual(find_similar_tags(tags), [])
+
+    def test_sorted_largest_group_first(self):
+        tags = [
+            {'term_id': 1, 'name': 'ai'},
+            {'term_id': 2, 'name': 'AI'},
+            {'term_id': 3, 'name': 'wordpress'},
+            {'term_id': 4, 'name': 'Wordpress'},
+            {'term_id': 5, 'name': 'wordpress '},
+        ]
+        groups = find_similar_tags(tags)
+        self.assertEqual(len(groups), 2)
+        # The 3-tag wordpress group must sort before the 2-tag ai group.
+        self.assertEqual(len(groups[0]), 3)
+        self.assertEqual(len(groups[1]), 2)
+
+    def test_empty_input(self):
+        self.assertEqual(find_similar_tags([]), [])
 
 
 if __name__ == '__main__':

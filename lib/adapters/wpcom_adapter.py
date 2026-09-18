@@ -23,6 +23,14 @@ import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+# WpcomApiError.error codes where the origin site may have actually
+# applied a mutating call even though we got no usable confirmation back
+# — WordPress.com's Jetpack relay can time out on the *response* after
+# the origin has already made the change (see taxonomist#43, which fixes
+# this for set_post_categories(); set_post_tags() below uses the same
+# read-back pattern since it's the same relay underneath).
+TIMEOUT_SHAPED_ERRORS = {'remote_request_timeout', 'connection_error'}
+
 
 def wp_urlencode(params):
     """
@@ -75,6 +83,14 @@ ACTION_CREATE_CAT = 'CREATE_CAT'
 ACTION_DELETE_CAT = 'DELETE_CAT'
 ACTION_UPDATE_CAT = 'UPDATE_CAT'
 ACTION_SET_DEFAULT = 'SET_DEFAULT'
+
+# Tag equivalents. No ACTION_SET_DEFAULT counterpart — tags have no
+# default-term concept in WordPress, so there's nothing to fall back to
+# and nothing to log a default change for.
+ACTION_SET_TAGS = 'SET_TAGS'
+ACTION_CREATE_TAG = 'CREATE_TAG'
+ACTION_DELETE_TAG = 'DELETE_TAG'
+ACTION_UPDATE_TAG = 'UPDATE_TAG'
 
 # Sources for the combined replay stream in restore_from_logs.
 SOURCE_TERM = 'term'
@@ -131,10 +147,17 @@ class WpcomAdapter:
         self.access_token = conn.get('access_token')
         self.site_url = config.get('site_url', '')
         self._category_cache = None
+        self._tag_cache = None
         # When set via set_logging(), every mutating call appends to these
         # TSV files so a later restore() can replay them in reverse.
         self.changes_log_path = None
         self.terms_log_path = None
+        # Tag equivalents. Separate files from the category logs above —
+        # tag support does not yet have an automated restore path (see
+        # set_logging()), so these are kept apart rather than interleaved
+        # into logs a restore might misinterpret.
+        self.tag_changes_log_path = None
+        self.tag_terms_log_path = None
         # Track which log paths have already had a header row written this
         # process so _append_tsv doesn't stat() the file on every row.
         self._log_headers_written = set()
@@ -391,6 +414,113 @@ class WpcomAdapter:
         )
         return resp.get('found', 0)
 
+    # --- Tag cache ---
+    #
+    # Mirrors the category cache above exactly. WordPress.com exposes
+    # tags (WordPress core's `post_tag` taxonomy) via a /tags REST
+    # surface that matches /categories in shape — same ID/slug/
+    # description/post_count/meta fields, same v1.1-slug-based and
+    # wp/v2-ID-based endpoint pair, same duplicate-slug edge case. The
+    # only structural difference is that tags have no parent (flat, not
+    # hierarchical) and no site-wide default term.
+
+    def _ensure_tag_cache(self):
+        if self._tag_cache is None:
+            self._tag_cache = self.list_tags()
+        return self._tag_cache
+
+    def _invalidate_tag_cache(self):
+        self._tag_cache = None
+
+    def _find_tag(self, predicate):
+        """Find a tag matching `predicate`. Cache-first, one refresh on miss."""
+        for tag in self._ensure_tag_cache():
+            if predicate(tag):
+                return tag
+        self._invalidate_tag_cache()
+        for tag in self._ensure_tag_cache():
+            if predicate(tag):
+                return tag
+        return None
+
+    def _get_tag_by_id(self, term_id):
+        # WP.com sometimes returns IDs as strings; compare as ints so an
+        # int term_id still matches a string '49' (and vice versa).
+        def matches(t):
+            tid = t.get('ID')
+            if tid is None:
+                return False
+            try:
+                return int(tid) == int(term_id)
+            except (TypeError, ValueError):
+                return False
+        return self._find_tag(matches)
+
+    def _lookup_tag_by_slug(self, slug):
+        if not slug:
+            return None
+        return self._find_tag(lambda t: t.get('slug') == slug)
+
+    def _has_duplicate_tag_slugs(self, slug):
+        """Check if more than one tag shares this slug."""
+        count = sum(
+            1 for t in self._ensure_tag_cache() if t['slug'] == slug
+        )
+        return count > 1
+
+    def _update_tag_v2(self, term_id, fields):
+        """Update a tag using the wp/v2 endpoint (ID-based).
+
+        Reuses the generic _request_v2() built for categories — WordPress
+        core registers /wp/v2/tags for the post_tag taxonomy exactly
+        parallel to /wp/v2/categories, so no tag-specific HTTP plumbing
+        is needed here.
+        """
+        return self._request_v2('POST', f'tags/{term_id}', data=fields)
+
+    def _get_tag_count(self):
+        """Get the current total number of tags on the site."""
+        resp = self._get(
+            f'/sites/{self.site_id}/tags',
+            params={'number': 0},
+        )
+        return resp.get('found', 0)
+
+    def _resolve_tag_id_to_name(self, term_id):
+        tag = self._get_tag_by_id(term_id)
+        if tag is None:
+            raise WpcomApiError(
+                404, 'not_found', f'Tag ID {term_id} not found',
+            )
+        return tag['name']
+
+    def _get_post_tag_ids(self, post_id):
+        """
+        Read a post's current tag IDs directly from the API.
+
+        Used by set_post_tags() to check whether a write actually landed
+        when its confirmation response was lost — the same
+        remote_request_timeout failure mode documented for categories in
+        taxonomist#43 applies equally here, since it's the same
+        WordPress.com/Jetpack relay underneath.
+
+        Returns:
+            A set of integer tag IDs, or None if the post itself
+            couldn't be read back.
+        """
+        try:
+            post = self._get(
+                f'/sites/{self.site_id}/posts/{post_id}',
+                params={'fields': 'ID,tags'},
+            )
+        except WpcomApiError:
+            return None
+        tag_hash = post.get('tags') or {}
+        return {
+            int(tag['ID']) for tag in tag_hash.values()
+            if isinstance(tag, dict) and 'ID' in tag
+        }
+
     # --- WpCliAdapter-compatible interface ---
 
     def list_categories(self):
@@ -419,14 +549,46 @@ class WpcomAdapter:
             offset += page_size
         return all_categories
 
+    def list_tags(self):
+        """
+        List all tags with metadata.
+
+        Paginates through all tags (1000 per page). Mirrors
+        list_categories() exactly — same endpoint shape, same pagination
+        behavior — just against /tags (WordPress core's `post_tag`
+        taxonomy) instead of /categories. Tags have no `parent` field
+        since the taxonomy is flat.
+
+        Returns:
+            List of tag dicts with at least: ID, name, slug,
+            description, post_count.
+        """
+        all_tags = []
+        offset = 0
+        page_size = 1000
+        while True:
+            resp = self._get(
+                f'/sites/{self.site_id}/tags',
+                params={'number': page_size, 'offset': offset},
+            )
+            tags = resp.get('tags', [])
+            all_tags.extend(tags)
+            found = resp.get('found', 0)
+            if offset + page_size >= found or not tags:
+                break
+            offset += page_size
+        return all_tags
+
     def export_posts(self, output_path):
         """
-        Export all published posts with categories to a JSON file.
+        Export all published posts with categories and tags to a JSON file.
 
         Uses offset pagination with dedupe. The v1.1 posts endpoint does
         not return `meta.next_page` (see backup()), so a page_handle loop
         silently truncates to the first 100 posts; offset is the shape the
-        endpoint actually supports. Normalizes category hashes to lists.
+        endpoint actually supports. Normalizes category and tag hashes to
+        lists — both come back from the API the same way (`{name: {...}}`),
+        so one pass handles both.
 
         Args:
             output_path: Path to write the JSON file.
@@ -440,7 +602,7 @@ class WpcomAdapter:
                 'number': 100,
                 'offset': offset,
                 'status': 'publish',
-                'fields': 'ID,title,content,date,categories,URL',
+                'fields': 'ID,title,content,date,categories,tags,URL',
             })
             posts = resp.get('posts') or []
             if not posts:
@@ -463,6 +625,12 @@ class WpcomAdapter:
                 cat_ids = [int(v['ID']) for v in cat_hash.values()]
                 cat_slugs = [v.get('slug', '') for v in cat_hash.values()]
 
+                # Tags come back in the identical {name: {ID: ...}} shape.
+                tag_hash = post.get('tags') or {}
+                tag_names = list(tag_hash.keys())
+                tag_ids = [int(v['ID']) for v in tag_hash.values()]
+                tag_slugs = [v.get('slug', '') for v in tag_hash.values()]
+
                 content = post.get('content', '')
                 # Strip HTML tags for plain-text analysis.
                 content = re.sub(r'<[^>]+>', '', content)
@@ -476,6 +644,9 @@ class WpcomAdapter:
                     'categories': cat_names,
                     'category_ids': cat_ids,
                     'category_slugs': cat_slugs,
+                    'tags': tag_names,
+                    'tag_ids': tag_ids,
+                    'tag_slugs': tag_slugs,
                     'url': post.get('URL', ''),
                 })
 
@@ -940,21 +1111,360 @@ class WpcomAdapter:
             new_value=f'{term_id}:{new_cat.get("slug", "")}',
         )
 
+    # --- Tag interface ---
+    #
+    # Mirrors the category interface above. Tags are WordPress core's
+    # `post_tag` taxonomy — flat (no parent), no site-wide default term,
+    # otherwise the same REST shape as categories on WordPress.com.
+    #
+    # ASSUMPTION requiring empirical verification before heavy production
+    # use (flagged the same way the categories_by_id behavior originally
+    # was, before it got the "verified empirically" treatment in
+    # agents/apply.md): set_post_tags() below assumes the v1.2 posts
+    # endpoint accepts a `tags_by_id` parameter with the same true-replace,
+    # no-junk-creation semantics as `categories_by_id`. This is the
+    # overwhelmingly likely shape by direct symmetry with categories (both
+    # taxonomies share the same underlying REST controller on
+    # WordPress.com), and confirmed empirically for reads — a post's
+    # `terms.post_tag` hash on GET is byte-for-byte the same shape as
+    # `terms.category` — but the POST side has not yet been exercised
+    # against a live site. Do that (create one throwaway tag, assign it to
+    # a test post, read back, delete it) before trusting this at scale;
+    # see agents/tags.md.
+    #
+    # No restore-automation support yet: unlike categories,
+    # restore()/restore_from_logs()/restore_from_snapshot() do not know
+    # about tag_changes_log_path / tag_terms_log_path. A tag backup is
+    # still captured (see backup()) for manual recovery in the meantime.
+
+    def set_post_tags(self, post_id, tag_ids,
+                      old_tag_ids=None, post_title='',
+                      allow_clear=True):
+        """
+        Set tags for a post by term IDs.
+
+        Uses v1.2 + `tags_by_id`, mirroring set_post_categories()'s use of
+        `categories_by_id` for the same reasons (a name-based parameter
+        risks the same silent failure modes — see PR #10 for the
+        categories investigation this assumes carries over).
+
+        Args:
+            post_id: Integer post ID.
+            tag_ids: List of integer tag IDs to set.
+            old_tag_ids: List of tag IDs the post had before this call.
+                Required when logging is enabled, same as
+                set_post_categories()'s old_category_ids.
+            post_title: Optional title for the log row (display only).
+            allow_clear: When True (default — unlike
+                set_post_categories(), where the default is False), an
+                empty tag_ids list is allowed. Categories need
+                allow_clear=False by default because WordPress falls a
+                categoryless post back to the site's default category,
+                making an accidental empty list dangerous. Tags have no
+                such fallback: a post with zero tags is a completely
+                normal, intentional state, not a wipe. Set False if you
+                specifically want to guard against an accidental empty
+                list in your own calling code.
+
+        Raises:
+            WpcomApiError: If any tag ID is not found in the local cache,
+                or if the API silently drops one of the submitted IDs. If
+                the POST itself hits a lost-confirmation-shaped error
+                (see taxonomist#43 — the same Jetpack relay timeout
+                applies here), a read-back is attempted before raising.
+            ValueError: If tag_ids is empty and allow_clear is False, or
+                if logging is enabled but old_tag_ids is not supplied.
+        """
+        tag_ids = [int(tid) for tid in tag_ids]
+        if not tag_ids and not allow_clear:
+            raise ValueError(
+                f'set_post_tags(post_id={post_id}): refusing to set an '
+                'empty tag list with allow_clear=False.'
+            )
+        names = [self._resolve_tag_id_to_name(tid) for tid in tag_ids]
+
+        old_names = []
+        old_slugs = []
+        new_slugs = []
+        if self.tag_changes_log_path and old_tag_ids is None:
+            raise ValueError(
+                f'set_post_tags(post_id={post_id}): old_tag_ids is '
+                'required when logging is enabled. Pass the pre-change '
+                'tag IDs from the export so the change log can record a '
+                'reversible operation.'
+            )
+        if self.tag_changes_log_path:
+            for tid in old_tag_ids or []:
+                tag = self._get_tag_by_id(tid)
+                if tag is not None:
+                    old_names.append(tag['name'])
+                    old_slugs.append(tag.get('slug', ''))
+            new_slugs = [
+                self._get_tag_by_id(tid).get('slug', '')
+                for tid in tag_ids
+            ]
+
+        v1_2_url = (
+            f'https://public-api.wordpress.com/rest/v1.2'
+            f'/sites/{self.site_id}/posts/{post_id}'
+        )
+        sent_ids = set(tag_ids)
+        timeout_error = None
+        try:
+            result = self._request(
+                'POST',
+                path='',
+                override_url=v1_2_url,
+                json_body={'tags_by_id': tag_ids},
+            )
+        except WpcomApiError as e:
+            if e.error not in TIMEOUT_SHAPED_ERRORS:
+                raise
+            timeout_error = e
+            live_ids = self._get_post_tag_ids(post_id)
+            if live_ids is None:
+                raise
+            returned_ids = live_ids
+        else:
+            # Detect silent drops the same way set_post_categories() does.
+            returned_ids = set()
+            terms_tag = (result.get('terms') or {}).get('post_tag') or {}
+            for tag in terms_tag.values():
+                if isinstance(tag, dict) and 'ID' in tag:
+                    returned_ids.add(int(tag['ID']))
+            if not returned_ids:
+                for tag in (result.get('tags') or {}).values():
+                    if isinstance(tag, dict) and 'ID' in tag:
+                        returned_ids.add(int(tag['ID']))
+
+        if sent_ids and returned_ids != sent_ids:
+            dropped = sorted(sent_ids - returned_ids)
+            extra = sorted(returned_ids - sent_ids)
+            raise WpcomApiError(
+                500, 'tags_drift',
+                f'set_post_tags(post_id={post_id}): sent '
+                f'{sorted(sent_ids)} but post ended with '
+                f'{sorted(returned_ids)} '
+                f'(dropped={dropped}, extra={extra})',
+            ) from timeout_error
+
+        if self.tag_changes_log_path:
+            self._log_tag_change(
+                action=ACTION_SET_TAGS,
+                post_id=post_id,
+                post_title=post_title,
+                old_tags=old_names,
+                new_tags=names,
+                tags_added=[n for n in names if n not in old_names],
+                tags_removed=[n for n in old_names if n not in names],
+                old_tag_slugs=old_slugs,
+                new_tag_slugs=new_slugs,
+            )
+
+    def create_tag(self, name, slug, description=''):
+        """
+        Create a new tag.
+
+        Assumes /tags/new behaves like /categories/new (slug is advisory,
+        WP.com derives it from the name; duplicate display names are
+        rejected) — see the module-level assumption note above the Tag
+        interface section. No `parent` parameter: tags are flat.
+
+        Args:
+            name: Display name.
+            slug: Requested URL slug (advisory — read the real one back
+                from the response).
+            description: Tag description.
+
+        Returns:
+            API response dict with the new tag (use its `slug`).
+        """
+        data = {'name': name}
+        if slug:
+            data['slug'] = slug
+        if description:
+            data['description'] = description
+
+        result = self._post(f'/sites/{self.site_id}/tags/new', data=data)
+        self._invalidate_tag_cache()
+        self._log_tag_term_op(
+            ACTION_CREATE_TAG,
+            term_id=result.get('ID', 0),
+            slug=result.get('slug', slug or ''),
+            field='*',
+            old_value='',
+            new_value=json.dumps(_term_snapshot(result), ensure_ascii=False),
+        )
+        return result
+
+    def _delete_tag_v2(self, term_id):
+        """Delete a tag using the wp/v2 endpoint (ID-based)."""
+        return self._request_v2('DELETE', f'tags/{term_id}?force=true')
+
+    def delete_tag(self, term_id):
+        """
+        Delete a tag by term ID.
+
+        Always resolves the term_id to its slug from live data before
+        deleting — never guesses. When duplicate slugs exist, uses the
+        wp/v2 ID-based endpoint.
+
+        Args:
+            term_id: Integer tag ID.
+
+        Raises:
+            TypeError: If term_id is not an int.
+            WpcomApiError: If tag not found.
+        """
+        if not isinstance(term_id, int):
+            raise TypeError(
+                f'term_id must be int, got {type(term_id).__name__}'
+            )
+        tag = self._get_tag_by_id(term_id)
+        if tag is None:
+            raise WpcomApiError(
+                404, 'not_found', f'Tag {term_id} does not exist',
+            )
+        snapshot = json.dumps(_term_snapshot(tag), ensure_ascii=False)
+
+        if self._has_duplicate_tag_slugs(tag['slug']):
+            self._delete_tag_v2(term_id)
+        else:
+            slug = urllib.parse.quote(tag['slug'], safe='')
+            self._post(
+                f'/sites/{self.site_id}/tags/slug:{slug}/delete',
+            )
+        self._invalidate_tag_cache()
+        self._log_tag_term_op(
+            ACTION_DELETE_TAG,
+            term_id=tag.get('ID', term_id),
+            slug=tag.get('slug', ''),
+            field='*',
+            old_value=snapshot,
+            new_value='',
+        )
+
+    def update_tag(self, term_id, fields):
+        """
+        Update a tag's fields.
+
+        Mirrors update_category() exactly, including the empty-string
+        NULL-byte workaround and the verify-after-write field comparison,
+        minus anything related to `parent` (tags have none).
+
+        Args:
+            term_id: Integer tag ID.
+            fields: Dict of fields to update (description, name, etc.).
+
+        Returns:
+            API response dict.
+
+        Raises:
+            WpcomApiError: If tag not found, a duplicate is detected, or
+                the API silently fails to apply a requested field update.
+        """
+        if not isinstance(term_id, int):
+            raise TypeError(
+                f'term_id must be int, got {type(term_id).__name__}'
+            )
+        current = self._get_tag_by_id(term_id)
+        if current is None:
+            raise WpcomApiError(
+                404, 'not_found', f'Tag {term_id} not found',
+            )
+
+        payload = dict(fields)
+        old_field_values = {f: current.get(f, '') for f in fields.keys()}
+        log_slug = current.get('slug', '')
+
+        if self._has_duplicate_tag_slugs(current['slug']):
+            result = self._update_tag_v2(term_id, payload)
+            self._invalidate_tag_cache()
+            return result
+
+        # Same empty-string-clears-nothing workaround as update_category()
+        # — see that method's docstring for the full explanation. Assumed
+        # to carry over to /tags since it's the same underlying v1.1
+        # term-update controller; verify if this ever misbehaves.
+        for key, value in list(payload.items()):
+            if isinstance(value, str) and value == '':
+                payload[key] = '\x00'
+
+        pre_count = self._get_tag_count()
+
+        slug = urllib.parse.quote(current['slug'], safe='')
+        result = self._post(
+            f'/sites/{self.site_id}/tags/slug:{slug}',
+            data=payload,
+        )
+
+        post_count = self._get_tag_count()
+        if post_count > pre_count:
+            raise WpcomApiError(
+                409, 'duplicate_detected',
+                f'Term count increased from {pre_count} to {post_count} '
+                f'during update of tag {term_id}. A duplicate may have '
+                f'been created. Manual inspection required.',
+            )
+
+        for key, intended in fields.items():
+            actual = result.get(key)
+            if actual is None:
+                actual = ''
+            if str(actual) != str(intended):
+                raise WpcomApiError(
+                    500, 'update_no_op',
+                    f'update_tag(term_id={term_id}): field {key!r} was '
+                    f'sent as {intended!r} but the API returned '
+                    f'{actual!r} after the update',
+                )
+
+        self._invalidate_tag_cache()
+
+        for field, new_val in fields.items():
+            old_val = old_field_values.get(field, '')
+            if old_val == new_val:
+                continue
+            self._log_tag_term_op(
+                ACTION_UPDATE_TAG,
+                term_id=term_id,
+                slug=log_slug,
+                field=field,
+                old_value='' if old_val is None else str(old_val),
+                new_value='' if new_val is None else str(new_val),
+            )
+
+        return result
+
     def backup(self, output_path):
         """
         Create a full taxonomy state backup.
+
+        Captures tags alongside categories (post_tags mirrors
+        post_categories) so a tag-optimization pass has the same
+        pre-change snapshot guarantee categories already have. Note this
+        is capture-only: restore()/restore_from_logs()/
+        restore_from_snapshot() do not yet know how to replay tag state
+        from this backup — see the Tag interface section above
+        set_post_tags(). Until that lands, a tag revert is manual: read
+        `tags` and `post_tags` back out of this file.
 
         Args:
             output_path: Path to write the backup JSON file.
         """
         categories = self.list_categories()
+        tags = self.list_tags()
 
-        # Get post-category mappings. Uses offset pagination because
-        # WP.com v1.1 does not return `meta.next_page` for the posts
-        # endpoint — a page_handle-based loop silently truncates to
-        # the first 100 posts on every site. Offset is less elegant
-        # but is the shape the v1.1 endpoint actually supports.
+        # Get post-category and post-tag mappings in the same pass — a
+        # post's categories and tags come back in one API response, so
+        # there's no reason to paginate the posts endpoint twice. Uses
+        # offset pagination because WP.com v1.1 does not return
+        # `meta.next_page` for the posts endpoint — a page_handle-based
+        # loop silently truncates to the first 100 posts on every site.
+        # Offset is less elegant but is the shape the v1.1 endpoint
+        # actually supports.
         post_categories = []
+        post_tags = []
         seen_ids = set()
         offset = 0
         while True:
@@ -962,7 +1472,7 @@ class WpcomAdapter:
                 'number': 100,
                 'offset': offset,
                 'status': 'publish',
-                'fields': 'ID,title,categories',
+                'fields': 'ID,title,categories,tags',
             })
             batch = resp.get('posts') or []
             if not batch:
@@ -984,6 +1494,13 @@ class WpcomAdapter:
                     'category_ids': [v['ID'] for v in cat_hash.values()],
                     'category_slugs': [v.get('slug', '') for v in cat_hash.values()],
                 })
+                tag_hash = post.get('tags') or {}
+                post_tags.append({
+                    'post_id': post_id,
+                    'post_title': post.get('title', ''),
+                    'tag_ids': [v['ID'] for v in tag_hash.values()],
+                    'tag_slugs': [v.get('slug', '') for v in tag_hash.values()],
+                })
             if new_in_batch == 0:
                 break
             offset += 100
@@ -994,7 +1511,8 @@ class WpcomAdapter:
         # (category genuinely missing) and default_category_unknown (the
         # settings response didn't carry a default) — in both cases the
         # backup records an empty default and continues rather than failing
-        # outright. Other errors should propagate.
+        # outright. Other errors should propagate. There is no equivalent
+        # for tags — WordPress has no default-tag concept.
         try:
             default_cat = self.get_default_category()
             default_slug = default_cat.get('slug', '')
@@ -1020,6 +1538,15 @@ class WpcomAdapter:
                 'parent': c.get('parent', 0),
             } for c in categories],
             'post_categories': post_categories,
+            'total_tags': len(tags),
+            'tags': [{
+                'term_id': t['ID'],
+                'name': t['name'],
+                'slug': t['slug'],
+                'description': t.get('description', ''),
+                'count': t.get('post_count', 0),
+            } for t in tags],
+            'post_tags': post_tags,
         }
 
         with open(output_path, 'w', encoding='utf-8') as f:
@@ -1044,34 +1571,60 @@ class WpcomAdapter:
     RESTORE_LOG_HEADER = (
         'timestamp', 'kind', 'detail', 'status', 'error',
     )
+    # Tag logs are deliberately separate files from the category logs
+    # above (same column shapes, tag-specific column names) rather than a
+    # shared file with a taxonomy column — restore()/restore_from_logs()
+    # don't know how to replay them yet (see the Tag interface section),
+    # so keeping them apart avoids a future restore accidentally tripping
+    # over rows it can't interpret.
+    TAG_LOG_HEADER = (
+        'timestamp', 'action', 'post_id', 'post_title',
+        'old_tags', 'new_tags', 'tags_added', 'tags_removed',
+        'old_tag_slugs', 'new_tag_slugs',
+    )
+    TAG_TERM_LOG_HEADER = (
+        'timestamp', 'action', 'term_id', 'slug',
+        'field', 'old_value', 'new_value',
+    )
 
-    def set_logging(self, changes_log_path=None, terms_log_path=None):
+    def set_logging(self, changes_log_path=None, terms_log_path=None,
+                    tag_changes_log_path=None, tag_terms_log_path=None):
         """
         Enable mutation logging to TSV files.
 
         Once set, every create/update/delete/set_post_categories/
         set_default_category call appends a row to the appropriate log.
-        Pass None to either argument to leave that log disabled.
+        Pass None to any argument to leave that log disabled.
 
         Args:
-            changes_log_path: Path for the post-change TSV log.
-            terms_log_path: Path for the term-operation TSV log.
+            changes_log_path: Path for the post-category-change TSV log.
+            terms_log_path: Path for the category-term-operation TSV log.
+            tag_changes_log_path: Path for the post-tag-change TSV log.
+            tag_terms_log_path: Path for the tag-term-operation TSV log.
         """
         self.changes_log_path = changes_log_path
         self.terms_log_path = terms_log_path
+        self.tag_changes_log_path = tag_changes_log_path
+        self.tag_terms_log_path = tag_terms_log_path
 
     @contextmanager
     def _logging_suspended(self):
         """Suspend logging within a `with` block — used during restore."""
         saved_changes = self.changes_log_path
         saved_terms = self.terms_log_path
+        saved_tag_changes = self.tag_changes_log_path
+        saved_tag_terms = self.tag_terms_log_path
         self.changes_log_path = None
         self.terms_log_path = None
+        self.tag_changes_log_path = None
+        self.tag_terms_log_path = None
         try:
             yield
         finally:
             self.changes_log_path = saved_changes
             self.terms_log_path = saved_terms
+            self.tag_changes_log_path = saved_tag_changes
+            self.tag_terms_log_path = saved_tag_terms
 
     def _append_tsv(self, path, header, row):
         """
@@ -1139,6 +1692,37 @@ class WpcomAdapter:
                 # stable across a delete+recreate, and free of '|'.
                 '|'.join(old_category_slugs),
                 '|'.join(new_category_slugs),
+            ),
+        )
+
+    def _log_tag_term_op(self, action, term_id, slug, field, old_value, new_value):
+        if not self.tag_terms_log_path:
+            return
+        ts = self._log_timestamp()
+        self._append_tsv(
+            self.tag_terms_log_path,
+            self.TAG_TERM_LOG_HEADER,
+            (ts, action, str(term_id), slug, field, old_value, new_value),
+        )
+
+    def _log_tag_change(self, action, post_id, post_title,
+                        old_tags, new_tags,
+                        tags_added, tags_removed,
+                        old_tag_slugs=(), new_tag_slugs=()):
+        if not self.tag_changes_log_path:
+            return
+        ts = self._log_timestamp()
+        self._append_tsv(
+            self.tag_changes_log_path,
+            self.TAG_LOG_HEADER,
+            (
+                ts, action, str(post_id), post_title,
+                '|'.join(old_tags),
+                '|'.join(new_tags),
+                '|'.join(tags_added),
+                '|'.join(tags_removed),
+                '|'.join(old_tag_slugs),
+                '|'.join(new_tag_slugs),
             ),
         )
 
