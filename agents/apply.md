@@ -162,6 +162,36 @@ names drift when a category is renamed upstream of the call.
   before POSTing, and diff the response's `terms.category` against what
   you sent to detect drops.
 
+**Observed latency and timeout behavior** (verified empirically, on a
+~100-post `wpcom-api` apply run):
+
+- **Individual `categories_by_id` calls routinely take 20–30 seconds.**
+  This is normal — WordPress.com appears to do cache/taxonomy-count
+  invalidation server-side before responding — not a hang. Don't kill an
+  apply process based on apparent inactivity alone; use per-post progress
+  logging (unbuffered output, e.g. `python3 -u`, with a line printed
+  before and after each post) so you can tell "still working" from
+  "actually stuck."
+- **A timed-out call does not necessarily mean the write failed.**
+  WordPress.com's Jetpack relay can time out on the *response* after the
+  origin site has already applied the change, surfacing as an HTTP 400
+  with `{"error": "remote_request_timeout", "message": "...cURL error
+  28: Operation timed out..."}`. `WpcomAdapter.set_post_categories()`
+  handles this automatically: on a `remote_request_timeout` (or a
+  connection-level failure), it reads the post back and only raises if
+  the live categories don't actually match what was sent. If you're
+  calling the API directly instead of through the adapter, do the same
+  read-back before treating a timeout as a real failure — and never
+  blindly retry a `create_category`-style call on a timeout, since
+  unlike `set_post_categories`'s full replace, a blind retry there could
+  create a duplicate category.
+- **Transient network errors (timeouts, connection resets) are retried
+  automatically** by `WpcomAdapter._request()` — 3 attempts with
+  exponential backoff by default, configurable via
+  `connection.max_retries` / `connection.retry_backoff_seconds` in
+  `config.json`. A real API error (an actual HTTP error response, or a
+  200 with an `error` field) is never retried.
+
 **Custom Taxonomies**: To update custom taxonomies via the WordPress.com API, you MUST use the `terms` parameter. If you use Python to build the query, avoid the "stringified list" bug by using the `wp_urlencode` helper:
 
 ```python
