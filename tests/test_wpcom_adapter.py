@@ -474,6 +474,8 @@ class TestUpdateCategory(unittest.TestCase):
         mock_urlopen.side_effect = [
             _mock_response({'found': 2, 'categories': cats}),  # cache
             urllib.error.URLError('Name resolution failed'),
+            # Read-back: the update didn't land.
+            _mock_response({'found': 2, 'categories': cats}),
         ]
         adapter = WpcomAdapter(VALID_CONFIG)
         with self.assertRaises(WpcomApiError) as ctx:
@@ -662,6 +664,122 @@ class TestSetPostCategories(unittest.TestCase):
         # Must not raise — drift detection should find the match in
         # the legacy shape.
         adapter.set_post_categories(100, [1])
+
+    def _http_error(self, status, error, message):
+        """Build an HTTPError with a JSON body, as _request() expects."""
+        body = json.dumps({'error': error, 'message': message}).encode()
+        return urllib.error.HTTPError('url', status, error, {}, io.BytesIO(body))
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_reads_back_after_remote_request_timeout(self, mock_urlopen):
+        """A lost confirmation isn't a failure if the write landed anyway.
+
+        Regression for taxonomist#43: WordPress.com's Jetpack relay can
+        time out on the *response* after the origin site already applied
+        the category change. A read-back showing the intended state must
+        make this call succeed, not raise.
+        """
+        cats = [
+            {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
+            {'ID': 2, 'name': 'AI', 'slug': 'ai', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            self._http_error(
+                400, 'remote_request_timeout',
+                'The Jetpack site is inaccessible or returned an error: '
+                'Jetpack: [http_request_failed] cURL error 28: Operation '
+                'timed out after 30002 milliseconds with 0 bytes received',
+            ),
+            # Read-back: the write actually landed.
+            _mock_response({
+                'ID': 100,
+                'categories': {
+                    'Tech': {'ID': 1, 'slug': 'tech'},
+                    'AI': {'ID': 2, 'slug': 'ai'},
+                },
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        # Must not raise.
+        adapter.set_post_categories(100, [1, 2])
+        self.assertEqual(mock_urlopen.call_count, 3)
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_raises_when_readback_shows_write_did_not_land(self, mock_urlopen):
+        """A timeout where the write genuinely failed still raises."""
+        cats = [
+            {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': cats}),  # cache
+            self._http_error(400, 'remote_request_timeout', 'timed out'),
+            # Read-back: the post still has its old categories — the
+            # write never actually landed.
+            _mock_response({'ID': 100, 'categories': {}}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.set_post_categories(100, [1])
+        self.assertEqual(ctx.exception.error, 'categories_drift')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_raises_original_error_when_readback_itself_fails(self, mock_urlopen):
+        """If we can't even read the post back, surface the original error."""
+        cats = [
+            {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': cats}),  # cache
+            self._http_error(400, 'remote_request_timeout', 'timed out'),
+            self._http_error(404, 'unknown_post', 'Post not found'),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.set_post_categories(100, [1])
+        self.assertEqual(ctx.exception.error, 'remote_request_timeout')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_non_timeout_error_is_never_read_back(self, mock_urlopen):
+        """A real, non-transient error (e.g. auth) must not trigger a read-back."""
+        cats = [
+            {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': cats}),  # cache
+            self._http_error(403, 'unauthorized', 'bad token'),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.set_post_categories(100, [1])
+        self.assertEqual(ctx.exception.error, 'unauthorized')
+        # Only the cache GET + the failing POST — no read-back GET.
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    @patch('adapters.wpcom_adapter.time.sleep')
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_reads_back_after_raw_socket_timeout(self, mock_urlopen, mock_sleep):
+        """Our own 30s timeout can fire before the relay's. _request()
+        turns the raw socket.timeout into a connection_error once its
+        retries run out, and the read-back must still kick in."""
+        cats = [
+            {'ID': 1, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 1, 'categories': cats}),  # cache
+            socket.timeout('The read operation timed out'),
+            socket.timeout('The read operation timed out'),
+            # Read-back: the write actually landed.
+            _mock_response({
+                'ID': 100,
+                'categories': {'Tech': {'ID': 1, 'slug': 'tech'}},
+            }),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.max_retries = 2
+        # Must not raise.
+        adapter.set_post_categories(100, [1])
+        self.assertEqual(mock_urlopen.call_count, 4)
 
 
 class TestExportPosts(unittest.TestCase):
@@ -940,6 +1058,54 @@ class TestRequestRetry(unittest.TestCase):
         adapter = WpcomAdapter(config)
         self.assertEqual(adapter.max_retries, 5)
         self.assertEqual(adapter.retry_backoff_seconds, 0.5)
+
+    @patch('adapters.wpcom_adapter.time.sleep')
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_post_is_not_retried_by_default(self, mock_urlopen, mock_sleep):
+        """A POST may have been applied before the connection dropped, so
+        repeating it isn't safe unless the caller says so."""
+        mock_urlopen.side_effect = socket.timeout('The read operation timed out')
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter._post('/sites/12345/categories/new', data={'name': 'X'})
+        self.assertEqual(ctx.exception.error, 'connection_error')
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    @patch('adapters.wpcom_adapter.time.sleep')
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_idempotent_post_is_retried(self, mock_urlopen, mock_sleep):
+        """A caller can opt a POST into retries when repeating it ends in
+        the same state."""
+        mock_urlopen.side_effect = [
+            socket.timeout('The read operation timed out'),
+            _mock_response({'ok': True}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        result = adapter._post(
+            '/sites/12345/settings', data={'default_category': 2},
+            idempotent=True,
+        )
+        self.assertEqual(result, {'ok': True})
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    @patch('adapters.wpcom_adapter.time.sleep')
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_set_default_category_retries(self, mock_urlopen, mock_sleep):
+        """set_default_category() is idempotent, so its POST opts in."""
+        cats = [
+            {'ID': 1, 'name': 'General', 'slug': 'general', 'parent': 0},
+            {'ID': 2, 'name': 'Tech', 'slug': 'tech', 'parent': 0},
+        ]
+        mock_urlopen.side_effect = [
+            _mock_response({'found': 2, 'categories': cats}),  # cache
+            _mock_response({'default_category': 1}),  # current default
+            socket.timeout('The read operation timed out'),
+            _mock_response({'updated': {'default_category': 2}}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        adapter.set_default_category(2)
+        self.assertEqual(mock_urlopen.call_count, 4)
 
 
 class TestGetDefaultCategory(unittest.TestCase):
@@ -1257,7 +1423,7 @@ class FakeWpcom(WpcomAdapter):
         return len(self.cats)
 
     def _request(self, method, path, data=None, params=None,
-                 override_url=None, json_body=None):
+                 override_url=None, json_body=None, idempotent=None):
         # v1.2 + categories_by_id path used by set_post_categories.
         # The real adapter routes through override_url; recognize the
         # post-update shape here and apply IDs directly.
@@ -2015,6 +2181,224 @@ class TestReadBackVerification(unittest.TestCase):
         # No verification keys should appear on ops.
         for op in result['operations']:
             self.assertNotIn('verification', op)
+
+
+class TestCategoryWriteReadBack(unittest.TestCase):
+    """
+    Read-back after a lost confirmation on the category writes that
+    _request() doesn't retry (create, delete, update).
+
+    Once these stop being retried, a connection that drops after the
+    server applied the change comes back as a connection_error. Each
+    call checks what actually happened before raising, and logs the
+    change as usual when it landed so revert keeps working.
+    """
+
+    def _http_error(self, status, error, message=''):
+        body = json.dumps({'error': error, 'message': message}).encode()
+        return urllib.error.HTTPError('url', status, error, {}, io.BytesIO(body))
+
+    def _cats(self, *cats):
+        return _mock_response({'found': len(cats), 'categories': list(cats)})
+
+    # --- create_category ---
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_create_confirmed_by_read_back(self, mock_urlopen):
+        new = {'ID': 50, 'name': 'AI', 'slug': 'ai', 'parent': 0,
+               'description': ''}
+        mock_urlopen.side_effect = [
+            self._cats(),  # pre-write cache
+            socket.timeout('The read operation timed out'),
+            self._cats(new),  # read-back
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with patch.object(adapter, '_log_term_op') as log:
+            result = adapter.create_category('AI', 'ai')
+        self.assertEqual(result['ID'], 50)
+        # The POST was sent exactly once — never retried.
+        self.assertEqual(mock_urlopen.call_count, 3)
+        log.assert_called_once()
+        self.assertEqual(log.call_args[0][0], ACTION_CREATE_CAT)
+        self.assertEqual(log.call_args[1]['term_id'], 50)
+        self.assertEqual(log.call_args[1]['slug'], 'ai')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_create_read_back_matches_on_parent(self, mock_urlopen):
+        """A same-name category under a different parent isn't ours."""
+        other = {'ID': 50, 'name': 'AI', 'slug': 'ai', 'parent': 7}
+        mock_urlopen.side_effect = [
+            self._cats(),
+            socket.timeout('timed out'),
+            self._cats(other),
+            self._cats(other),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with patch.object(adapter, '_log_term_op') as log:
+            with self.assertRaises(WpcomApiError) as ctx:
+                adapter.create_category('AI', 'ai', parent=3)
+        self.assertEqual(ctx.exception.error, 'connection_error')
+        log.assert_not_called()
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_create_not_confirmed_raises_original(self, mock_urlopen):
+        mock_urlopen.side_effect = [
+            self._cats(),
+            socket.timeout('timed out'),
+            self._cats(),
+            self._cats(),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with patch.object(adapter, '_log_term_op') as log:
+            with self.assertRaises(WpcomApiError) as ctx:
+                adapter.create_category('AI', 'ai')
+        self.assertEqual(ctx.exception.error, 'connection_error')
+        log.assert_not_called()
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_create_ignores_category_that_already_existed(self, mock_urlopen):
+        """If the category was already there before the POST, finding it
+        on read-back proves nothing — and logging CREATE_CAT for it would
+        make revert delete a category we never created."""
+        existing = {'ID': 50, 'name': 'AI', 'slug': 'ai', 'parent': 0}
+        mock_urlopen.side_effect = [
+            self._cats(existing),
+            socket.timeout('timed out'),
+            self._cats(existing),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with patch.object(adapter, '_log_term_op') as log:
+            with self.assertRaises(WpcomApiError) as ctx:
+                adapter.create_category('AI', 'ai')
+        self.assertEqual(ctx.exception.error, 'connection_error')
+        log.assert_not_called()
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_create_real_error_is_not_read_back(self, mock_urlopen):
+        mock_urlopen.side_effect = [
+            self._cats(),
+            self._http_error(400, 'term_exists', 'already exists'),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with self.assertRaises(WpcomApiError) as ctx:
+            adapter.create_category('AI', 'ai')
+        self.assertEqual(ctx.exception.error, 'term_exists')
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    # --- delete_category ---
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_delete_confirmed_by_read_back(self, mock_urlopen):
+        cat = {'ID': 42, 'name': 'Old', 'slug': 'old', 'parent': 0,
+               'description': 'gone soon'}
+        mock_urlopen.side_effect = [
+            self._cats(cat),  # cache
+            socket.timeout('timed out'),  # slug delete POST
+            self._cats(),  # read-back: gone
+            self._cats(),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with patch.object(adapter, '_log_term_op') as log:
+            adapter.delete_category(42)
+        self.assertEqual(mock_urlopen.call_count, 4)
+        log.assert_called_once()
+        self.assertEqual(log.call_args[0][0], ACTION_DELETE_CAT)
+        snapshot = json.loads(log.call_args[1]['old_value'])
+        self.assertEqual(snapshot['description'], 'gone soon')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_delete_not_confirmed_raises_original(self, mock_urlopen):
+        cat = {'ID': 42, 'name': 'Old', 'slug': 'old', 'parent': 0}
+        mock_urlopen.side_effect = [
+            self._cats(cat),
+            socket.timeout('timed out'),
+            self._cats(cat),  # read-back: still there
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with patch.object(adapter, '_log_term_op') as log:
+            with self.assertRaises(WpcomApiError) as ctx:
+                adapter.delete_category(42)
+        self.assertEqual(ctx.exception.error, 'connection_error')
+        log.assert_not_called()
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_delete_v2_socket_timeout_is_read_back(self, mock_urlopen):
+        """The wp/v2 path (duplicate slugs) must turn a raw socket.timeout
+        into a connection_error too, and read back by ID — the other
+        category still has the same slug."""
+        cats = [
+            {'ID': 42, 'name': 'Reviews', 'slug': 'reviews', 'parent': 0},
+            {'ID': 99, 'name': 'Reviews', 'slug': 'reviews', 'parent': 5},
+        ]
+        mock_urlopen.side_effect = [
+            self._cats(*cats),
+            socket.timeout('timed out'),  # wp/v2 DELETE
+            self._cats(cats[1]),  # read-back: 42 gone, 99 remains
+            self._cats(cats[1]),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with patch.object(adapter, '_log_term_op') as log:
+            adapter.delete_category(42)
+        log.assert_called_once()
+        self.assertEqual(log.call_args[1]['term_id'], 42)
+
+    # --- update_category ---
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_update_confirmed_by_read_back(self, mock_urlopen):
+        cat = {'ID': 42, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': 'old'}
+        updated = dict(cat, description='new')
+        mock_urlopen.side_effect = [
+            self._cats(cat),  # cache
+            _mock_response({'found': 1}),  # pre-count
+            socket.timeout('timed out'),  # update POST
+            self._cats(updated),  # read-back
+            _mock_response({'found': 1}),  # post-count
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with patch.object(adapter, '_log_term_op') as log:
+            result = adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(result['description'], 'new')
+        log.assert_called_once()
+        self.assertEqual(log.call_args[1]['old_value'], 'old')
+        self.assertEqual(log.call_args[1]['new_value'], 'new')
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_update_confirmed_clear_by_read_back(self, mock_urlopen):
+        """A cleared field can come back as None or missing; both count
+        as the empty string the caller asked for."""
+        cat = {'ID': 42, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': 'old'}
+        cleared = {'ID': 42, 'name': 'Tech', 'slug': 'tech', 'parent': 0}
+        mock_urlopen.side_effect = [
+            self._cats(cat),
+            _mock_response({'found': 1}),
+            socket.timeout('timed out'),
+            self._cats(cleared),
+            _mock_response({'found': 1}),
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with patch.object(adapter, '_log_term_op') as log:
+            adapter.update_category(42, {'description': ''})
+        log.assert_called_once()
+
+    @patch('adapters.wpcom_adapter.urllib.request.urlopen')
+    def test_update_not_confirmed_raises(self, mock_urlopen):
+        cat = {'ID': 42, 'name': 'Tech', 'slug': 'tech', 'parent': 0,
+               'description': 'old'}
+        mock_urlopen.side_effect = [
+            self._cats(cat),
+            _mock_response({'found': 1}),
+            socket.timeout('timed out'),
+            self._cats(cat),  # read-back: unchanged
+        ]
+        adapter = WpcomAdapter(VALID_CONFIG)
+        with patch.object(adapter, '_log_term_op') as log:
+            with self.assertRaises(WpcomApiError) as ctx:
+                adapter.update_category(42, {'description': 'new'})
+        self.assertEqual(ctx.exception.error, 'connection_error')
+        log.assert_not_called()
 
 
 if __name__ == '__main__':
