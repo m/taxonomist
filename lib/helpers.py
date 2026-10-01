@@ -13,6 +13,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 from collections import Counter
 
 # Token limit for agent Read tool. Override via TAXONOMIST_MAX_BATCH_TOKENS env var.
@@ -355,6 +356,55 @@ def aggregate_results(results_dir):
     }
 
 
+def aggregate_tag_results(results_dir):
+    """
+    Combine per-batch tag-analysis result files into a single suggestions list.
+
+    Mirrors aggregate_results() exactly, but reads tag-result-NNN.json
+    files and each suggestion's 'tags' / 'new_tags' keys instead of
+    'cats' / 'new_cats'. Kept as a separate function (rather than a
+    parameter on aggregate_results) so category and tag result
+    directories can never be accidentally cross-read.
+
+    Args:
+        results_dir: Directory containing tag-result-NNN.json files.
+
+    Returns:
+        Dict with 'suggestions' (list of dicts), 'tag_counts' (Counter of
+        existing tag term_id -> count), and 'new_tag_counts' (Counter of
+        new tag name -> count).
+    """
+    suggestions_by_post_id = {}
+    unkeyed_suggestions = []
+
+    for filename in sorted(os.listdir(results_dir)):
+        if not (filename.startswith('tag-result-') and filename.endswith('.json')):
+            continue
+        with open(os.path.join(results_dir, filename)) as f:
+            batch = json.load(f)
+            for post in batch:
+                post_id = post.get('post_id')
+                if isinstance(post_id, int):
+                    suggestions_by_post_id[post_id] = post
+                else:
+                    unkeyed_suggestions.append(post)
+
+    all_suggestions = list(suggestions_by_post_id.values()) + unkeyed_suggestions
+    tag_counts = Counter()
+    new_tag_counts = Counter()
+    for post in all_suggestions:
+        for tag in post.get('tags', []):
+            tag_counts[tag] += 1
+        for tag in post.get('new_tags', []):
+            new_tag_counts[tag] += 1
+
+    return {
+        'suggestions': all_suggestions,
+        'tag_counts': tag_counts,
+        'new_tag_counts': new_tag_counts,
+    }
+
+
 def validate_export(posts):
     """
     Validate that an export JSON has the expected structure.
@@ -452,6 +502,47 @@ def validate_suggestions(suggestions):
                 errors.append(f'{label}: "new_cats" must be list')
             elif any(not isinstance(cat, str) for cat in entry['new_cats']):
                 errors.append(f'{label}: "new_cats" must contain only strings')
+
+    return {'valid': not errors, 'errors': errors}
+
+
+def validate_tag_suggestions(suggestions):
+    """
+    Validate that a tag-suggestions JSON has the expected structure.
+
+    Mirrors validate_suggestions() exactly, checking 'tags' / 'new_tags'
+    instead of 'cats' / 'new_cats'.
+
+    Args:
+        suggestions: Parsed JSON list from a tag-result file.
+
+    Returns:
+        Dict with 'valid' (bool) and 'errors' (list of strings).
+    """
+    errors = []
+    if not isinstance(suggestions, list):
+        return {'valid': False, 'errors': ['Suggestions must be a JSON array']}
+
+    for i, entry in enumerate(suggestions):
+        if not isinstance(entry, dict):
+            errors.append(f'Entry at index {i} is not an object')
+            continue
+        label = f'Post ID {entry.get("post_id", f"index {i}")}'
+        if 'post_id' not in entry:
+            errors.append(f'Entry at index {i}: missing "post_id"')
+        elif not isinstance(entry['post_id'], int):
+            errors.append(f'Entry at index {i}: "post_id" must be int')
+        if 'tags' not in entry:
+            errors.append(f'{label}: missing "tags"')
+        elif not isinstance(entry['tags'], list):
+            errors.append(f'{label}: "tags" must be list')
+        elif any(type(tag) is not int for tag in entry['tags']):
+            errors.append(f'{label}: "tags" must contain only ints')
+        if 'new_tags' in entry:
+            if not isinstance(entry['new_tags'], list):
+                errors.append(f'{label}: "new_tags" must be list')
+            elif any(not isinstance(tag, str) for tag in entry['new_tags']):
+                errors.append(f'{label}: "new_tags" must contain only strings')
 
     return {'valid': not errors, 'errors': errors}
 
@@ -656,6 +747,44 @@ def validate_category_ids(suggestions, valid_ids):
     }
 
 
+def validate_tag_ids(suggestions, valid_ids):
+    """
+    Check that every tag term ID in the suggestions is recognized.
+
+    Mirrors validate_category_ids() exactly, checking each suggestion's
+    'tags' list instead of 'cats'.
+
+    Args:
+        suggestions: List of suggestion dicts (each with a 'tags' list of
+            integer term IDs).
+        valid_ids: Set of valid tag term IDs (ints).
+
+    Returns:
+        A dict with keys:
+            valid (bool): True if all IDs are recognized.
+            unknown_ids (Counter): term ID -> count of occurrences.
+            errors (list[str]): Human-readable error descriptions.
+    """
+    unknown = Counter()
+    for entry in suggestions:
+        for tag in entry.get('tags', []):
+            if tag not in valid_ids:
+                unknown[tag] += 1
+
+    errors = []
+    if unknown:
+        errors.append(
+            f'{len(unknown)} unknown tag term ID(s): '
+            + ', '.join(f'{tid} ({n}x)' for tid, n in unknown.most_common(10))
+        )
+
+    return {
+        'valid': len(errors) == 0,
+        'unknown_ids': unknown,
+        'errors': errors,
+    }
+
+
 def _read_tsv_dicts(log_path):
     """Read a TSV file as a list of dicts keyed by header row."""
     with open(log_path, newline='') as f:
@@ -727,6 +856,137 @@ def resolve_category_export_row(categories, *, term_id=None, slug=None, name=Non
         match = slug_match
 
     return match
+
+
+def resolve_tag_export_row(tags, *, term_id=None, slug=None, name=None):
+    """
+    Resolve a tag from exported metadata without guessing.
+
+    Mirrors resolve_category_export_row() exactly. Delete/update
+    operations must use the exact term_id or slug captured during
+    export — never a slug derived from the display name.
+
+    Args:
+        tags: Parsed JSON list from data/export/tags.json or
+            backup["tags"].
+        term_id: Exact exported term ID to match.
+        slug: Exact exported slug to match.
+        name: Optional display name, used only to produce a clearer error
+            when a caller tries to resolve by name alone.
+
+    Returns:
+        Matching tag dict from the export.
+
+    Raises:
+        ValueError: If no stable identifier was provided, if duplicates
+            are present in the export, or if provided identifiers
+            disagree.
+        KeyError: If the requested term_id/slug does not exist in the
+            export.
+    """
+    if not isinstance(tags, list):
+        raise ValueError('tags must be a list of exported tag objects')
+
+    if term_id is None and slug is None:
+        if name:
+            raise ValueError(
+                f'Cannot resolve tag "{name}" from name alone; '
+                'use the exported term_id or exact slug instead.'
+            )
+        raise ValueError('Provide term_id or slug from the tag export')
+
+    match = None
+
+    if term_id is not None:
+        id_matches = [
+            tag for tag in tags
+            if isinstance(tag, dict) and tag.get('term_id') == term_id
+        ]
+        if not id_matches:
+            raise KeyError(f'No tag found with term_id {term_id}')
+        if len(id_matches) > 1:
+            raise ValueError(f'Duplicate term_id {term_id} found in tag export')
+        match = id_matches[0]
+
+    if slug is not None:
+        slug_matches = [
+            tag for tag in tags
+            if isinstance(tag, dict) and tag.get('slug') == slug
+        ]
+        if not slug_matches:
+            raise KeyError(f'No tag found with slug "{slug}"')
+        if len(slug_matches) > 1:
+            raise ValueError(f'Duplicate slug "{slug}" found in tag export')
+        slug_match = slug_matches[0]
+        if match is not None and match is not slug_match:
+            raise ValueError(
+                f'term_id {term_id} and slug "{slug}" resolve to different tags'
+            )
+        match = slug_match
+
+    return match
+
+
+def find_similar_tags(tags):
+    """
+    Group tags that are likely duplicates of each other by normalized name.
+
+    Tags have a different failure mode than categories. Categories are
+    few and curated, and break by over-concentration (one catch-all
+    eating half the posts). Tags accumulate freely over a blog's
+    lifetime and break by fragmentation: "WordPress" / "wordpress" /
+    "word-press" / "Wordpress" existing as four distinct terms, most
+    used once or twice, is a far more common tag problem than any single
+    tag being overused. This groups tags whose names collapse to the
+    same normalized form (case-folded, whitespace/hyphens/underscores
+    and other punctuation stripped, a simple trailing-"s" plural
+    stripped) so a human or an analysis agent can review merge
+    candidates directly, instead of eyeballing an alphabetized list of
+    hundreds of tags for near-duplicates.
+
+    Deliberately conservative: exact match after normalization only, no
+    fuzzy/edit-distance matching. A false negative (two truly-duplicate
+    tags that don't happen to normalize to the same key — e.g. "JS" vs
+    "javascript") just means a human notices it in the frequency table
+    instead, same as today. A false positive (grouping two unrelated
+    tags that happen to normalize the same way) would actively suggest
+    merging things that shouldn't be merged, which is the worse failure
+    mode to avoid, so this stays deliberately simple rather than reaching
+    for similarity scoring.
+
+    Args:
+        tags: List of tag dicts, each with at least 'name' (as exported
+            by data/export/tags.json or backup["tags"]).
+
+    Returns:
+        List of groups (each a list of the original tag dicts) for every
+        normalized key that collapsed 2+ distinct tags together.
+        Singleton keys are omitted — nothing to merge there. Sorted by
+        group size descending, then by normalized key, for a stable,
+        highest-impact-first review order.
+    """
+    def normalize(name):
+        key = name.strip().lower()
+        key = re.sub(r'[-_\s]+', '', key)
+        key = re.sub(r'[^\w]', '', key)
+        # Simple plural stripping. Guarded by length so short acronyms
+        # ("aws", "css") aren't mangled into something else short enough
+        # to collide with an unrelated tag.
+        if key.endswith('s') and len(key) > 3:
+            key = key[:-1]
+        return key
+
+    groups = {}
+    for tag in tags:
+        name = tag.get('name', '')
+        key = normalize(name)
+        if not key:
+            continue
+        groups.setdefault(key, []).append(tag)
+
+    similar = [group for group in groups.values() if len(group) > 1]
+    similar.sort(key=lambda g: (-len(g), normalize(g[0].get('name', ''))))
+    return similar
 
 
 def parse_change_log(log_path):
