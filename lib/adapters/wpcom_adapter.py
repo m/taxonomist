@@ -104,11 +104,17 @@ ACTION_UPDATE_TAG = 'UPDATE_TAG'
 # Sources for the combined replay stream in restore_from_logs.
 SOURCE_TERM = 'term'
 SOURCE_CHANGE = 'change'
+SOURCE_TAG_TERM = 'tag_term'
+SOURCE_TAG_CHANGE = 'tag_change'
 
 # restore() mode selection.
 MODE_AUTO = 'auto'
 MODE_LOGS = 'logs'
 MODE_SNAPSHOT = 'snapshot'
+
+# restore() taxonomy scope. Values match the WordPress taxonomy names.
+TAXONOMY_CATEGORY = 'category'
+TAXONOMY_TAG = 'post_tag'
 
 
 def _term_snapshot(cat):
@@ -161,10 +167,9 @@ class WpcomAdapter:
         # TSV files so a later restore() can replay them in reverse.
         self.changes_log_path = None
         self.terms_log_path = None
-        # Tag equivalents. Separate files from the category logs above —
-        # tag support does not yet have an automated restore path (see
-        # set_logging()), so these are kept apart rather than interleaved
-        # into logs a restore might misinterpret.
+        # Tag equivalents. Separate files from the category logs above,
+        # so a tag run and a category run can be reverted independently
+        # (see restore()'s tag_changes_log_path / tag_terms_log_path).
         self.tag_changes_log_path = None
         self.tag_terms_log_path = None
         # Track which log paths have already had a header row written this
@@ -536,6 +541,60 @@ class WpcomAdapter:
             1 for t in self._ensure_tag_cache() if t['slug'] == slug
         )
         return count > 1
+
+    def _verify_tag_state(self, slug, expected_fields):
+        """
+        Read back a tag and verify it matches expected state.
+
+        Mirrors _verify_category_state(). Returns an error string if
+        verification fails, None if OK.
+        """
+        self._invalidate_tag_cache()
+        tag = self._lookup_tag_by_slug(slug)
+        if tag is None:
+            return f'verification: tag slug "{slug}" not found after write'
+        mismatches = []
+        for field, expected in expected_fields.items():
+            actual = tag.get(field)
+            if str(actual) != str(expected):
+                mismatches.append(f'{field}: expected {expected!r}, got {actual!r}')
+        if mismatches:
+            return f'verification on tag "{slug}": {"; ".join(mismatches)}'
+        return None
+
+    def _verify_tag_absent(self, slug):
+        """Verify a tag no longer exists after deletion."""
+        self._invalidate_tag_cache()
+        if self._lookup_tag_by_slug(slug) is not None:
+            return f'verification: tag "{slug}" still exists after delete'
+        return None
+
+    def _recreate_tag(self, name, slug, description=''):
+        """
+        Recreate a tag during a restore, keeping its original slug.
+
+        /tags/new derives the slug from the name, so a tag whose slug was
+        not the name-derived one (e.g. "WordPress" holding `wordpress-2`
+        because another tag had `wordpress`) comes back with a different
+        slug. Post assignments are restored by slug, so put the original
+        back with an update before anything looks it up.
+
+        Raises:
+            WpcomApiError: If the create fails, or the tag was created but
+                its original slug could not be put back.
+        """
+        result = self.create_tag(name, slug, description)
+        if slug and result.get('slug') != slug and result.get('ID'):
+            try:
+                self.update_tag(int(result['ID']), {'slug': slug})
+            except WpcomApiError as e:
+                raise WpcomApiError(
+                    e.status_code, e.error,
+                    f'tag "{name}" was recreated as slug '
+                    f'"{result.get("slug")}" but its original slug '
+                    f'"{slug}" could not be restored: {e}',
+                ) from e
+        return result
 
     def _update_tag_v2(self, term_id, fields):
         """Update a tag using the wp/v2 endpoint (ID-based).
@@ -1331,10 +1390,10 @@ class WpcomAdapter:
     # before trusting this at scale; agents/tags.md (taxonomist#58) walks
     # through it.
     #
-    # No restore-automation support yet: unlike categories,
-    # restore()/restore_from_logs()/restore_from_snapshot() do not know
-    # about tag_changes_log_path / tag_terms_log_path. A tag backup is
-    # still captured (see backup()) for manual recovery in the meantime.
+    # Tag runs are reverted by restore(), same as category runs: pass
+    # tag_changes_log_path / tag_terms_log_path for inverse replay, or
+    # include TAXONOMY_TAG in `taxonomies` for a snapshot restore from
+    # backup()'s `tags` / `post_tags`.
 
     def set_post_tags(self, post_id, tag_ids,
                       old_tag_ids=None, post_title='',
@@ -1708,18 +1767,52 @@ class WpcomAdapter:
             if str('' if actual is None else actual) != str(intended):
                 raise error
         return live
+
+    def _iter_published_posts(self, fields):
+        """
+        Yield every published post, each once, with the given `fields`.
+
+        Uses offset pagination because WP.com v1.1 does not return
+        `meta.next_page` for the posts endpoint — a page_handle-based
+        loop silently truncates to the first 100 posts on every site.
+        Offset is less elegant but is the shape the v1.1 endpoint
+        actually supports.
+        """
+        seen_ids = set()
+        offset = 0
+        while True:
+            resp = self._get(f'/sites/{self.site_id}/posts', params={
+                'number': 100,
+                'offset': offset,
+                'status': 'publish',
+                'fields': fields,
+            })
+            batch = resp.get('posts') or []
+            if not batch:
+                break
+            new_in_batch = 0
+            for post in batch:
+                # Offset pagination can return duplicates at page
+                # boundaries if the underlying query shifts between
+                # calls. Dedupe so callers see each post once.
+                if post['ID'] in seen_ids:
+                    continue
+                seen_ids.add(post['ID'])
+                new_in_batch += 1
+                yield post
+            if new_in_batch == 0:
+                break
+            offset += 100
+
     def backup(self, output_path):
         """
         Create a full taxonomy state backup.
 
         Captures tags alongside categories (post_tags mirrors
         post_categories) so a tag-optimization pass has the same
-        pre-change snapshot guarantee categories already have. Note this
-        is capture-only: restore()/restore_from_logs()/
-        restore_from_snapshot() do not yet know how to replay tag state
-        from this backup — see the Tag interface section above
-        set_post_tags(). Until that lands, a tag revert is manual: read
-        `tags` and `post_tags` back out of this file.
+        pre-change snapshot guarantee categories already have.
+        restore_from_snapshot() replays `tags` / `post_tags` when tags
+        are in its scope.
 
         Args:
             output_path: Path to write the backup JSON file.
@@ -1729,53 +1822,25 @@ class WpcomAdapter:
 
         # Get post-category and post-tag mappings in the same pass — a
         # post's categories and tags come back in one API response, so
-        # there's no reason to paginate the posts endpoint twice. Uses
-        # offset pagination because WP.com v1.1 does not return
-        # `meta.next_page` for the posts endpoint — a page_handle-based
-        # loop silently truncates to the first 100 posts on every site.
-        # Offset is less elegant but is the shape the v1.1 endpoint
-        # actually supports.
+        # there's no reason to paginate the posts endpoint twice.
         post_categories = []
         post_tags = []
-        seen_ids = set()
-        offset = 0
-        while True:
-            resp = self._get(f'/sites/{self.site_id}/posts', params={
-                'number': 100,
-                'offset': offset,
-                'status': 'publish',
-                'fields': 'ID,title,categories,tags',
+        for post in self._iter_published_posts('ID,title,categories,tags'):
+            post_id = post['ID']
+            cat_hash = post.get('categories') or {}
+            post_categories.append({
+                'post_id': post_id,
+                'post_title': post.get('title', ''),
+                'category_ids': [v['ID'] for v in cat_hash.values()],
+                'category_slugs': [v.get('slug', '') for v in cat_hash.values()],
             })
-            batch = resp.get('posts') or []
-            if not batch:
-                break
-            new_in_batch = 0
-            for post in batch:
-                post_id = post['ID']
-                # Offset pagination can return duplicates at page
-                # boundaries if the underlying query shifts between
-                # calls. Dedupe so the backup stays stable.
-                if post_id in seen_ids:
-                    continue
-                seen_ids.add(post_id)
-                new_in_batch += 1
-                cat_hash = post.get('categories') or {}
-                post_categories.append({
-                    'post_id': post_id,
-                    'post_title': post.get('title', ''),
-                    'category_ids': [v['ID'] for v in cat_hash.values()],
-                    'category_slugs': [v.get('slug', '') for v in cat_hash.values()],
-                })
-                tag_hash = post.get('tags') or {}
-                post_tags.append({
-                    'post_id': post_id,
-                    'post_title': post.get('title', ''),
-                    'tag_ids': [v['ID'] for v in tag_hash.values()],
-                    'tag_slugs': [v.get('slug', '') for v in tag_hash.values()],
-                })
-            if new_in_batch == 0:
-                break
-            offset += 100
+            tag_hash = post.get('tags') or {}
+            post_tags.append({
+                'post_id': post_id,
+                'post_title': post.get('title', ''),
+                'tag_ids': [v['ID'] for v in tag_hash.values()],
+                'tag_slugs': [v.get('slug', '') for v in tag_hash.values()],
+            })
 
         # Resolve default category slug. The /sites/{id}/settings endpoint
         # requires authentication even on public sites, so suppress 401/403
@@ -1845,10 +1910,8 @@ class WpcomAdapter:
     )
     # Tag logs are deliberately separate files from the category logs
     # above (same column shapes, tag-specific column names) rather than a
-    # shared file with a taxonomy column — restore()/restore_from_logs()
-    # don't know how to replay them yet (see the Tag interface section),
-    # so keeping them apart avoids a future restore accidentally tripping
-    # over rows it can't interpret.
+    # shared file with a taxonomy column, so restore() can tell which
+    # taxonomies a run touched from which logs exist.
     TAG_LOG_HEADER = (
         'timestamp', 'action', 'post_id', 'post_title',
         'old_tags', 'new_tags', 'tags_added', 'tags_removed',
@@ -2019,7 +2082,8 @@ class WpcomAdapter:
 
     def restore(self, backup_path=None, changes_log_path=None,
                 terms_log_path=None, mode=MODE_AUTO, dry_run=False,
-                restore_log_path=None):
+                restore_log_path=None, tag_changes_log_path=None,
+                tag_terms_log_path=None, taxonomies=None):
         """
         Revert a Taxonomist run.
 
@@ -2027,11 +2091,13 @@ class WpcomAdapter:
             backup_path: Path to backup-{timestamp}.json. Required for
                 snapshot mode and used as the auto-mode fallback when
                 no logs are present.
-            changes_log_path: Path to the post change TSV (optional).
-            terms_log_path: Path to the term-op TSV (optional).
-            mode: MODE_AUTO (use logs if any present, else snapshot),
-                MODE_LOGS (force log replay; error if no logs), or
-                MODE_SNAPSHOT (force full backup replay).
+            changes_log_path: Path to the post category change TSV
+                (optional).
+            terms_log_path: Path to the category term-op TSV (optional).
+            mode: MODE_AUTO (replay the logs when every taxonomy in scope
+                has both of its logs, else snapshot), MODE_LOGS (force log
+                replay; error if no logs), or MODE_SNAPSHOT (force full
+                backup replay).
             dry_run: If True, return planned operations without writing.
             restore_log_path: Path for the restore audit TSV. Each
                 executed operation is streamed here as it completes so
@@ -2040,14 +2106,60 @@ class WpcomAdapter:
                 log from agent code — the adapter enforces it so an
                 agent that forgets the step can't produce a revert with
                 no audit trail.
+            tag_changes_log_path: Path to the post tag change TSV
+                (optional).
+            tag_terms_log_path: Path to the tag term-op TSV (optional).
+            taxonomies: Which taxonomies to revert: an iterable of
+                TAXONOMY_CATEGORY and/or TAXONOMY_TAG. Defaults to every
+                taxonomy that has a log present, or categories alone when
+                no log is present, so a snapshot revert of a category run
+                doesn't also rewrite every post's tags. Pass
+                [TAXONOMY_TAG] to snapshot-restore tags without logs.
 
         Returns:
             Dict with keys: mode, operations, errors, partial, dry_run.
         """
-        term_rows = _try_parse_log(terms_log_path, _parse_terms_tsv)
-        change_rows = _try_parse_log(changes_log_path, _parse_changes_tsv)
-        have_both_logs = bool(term_rows) and bool(change_rows)
-        have_any_log = bool(term_rows) or bool(change_rows)
+        logs = {
+            TAXONOMY_CATEGORY: (
+                _try_parse_log(changes_log_path, _parse_changes_tsv),
+                _try_parse_log(terms_log_path, _parse_terms_tsv),
+            ),
+            TAXONOMY_TAG: (
+                _try_parse_log(tag_changes_log_path, _parse_changes_tsv),
+                _try_parse_log(tag_terms_log_path, _parse_terms_tsv),
+            ),
+        }
+        if taxonomies is None:
+            scope = [
+                tax for tax, (changes, terms) in logs.items()
+                if changes or terms
+            ] or [TAXONOMY_CATEGORY]
+        else:
+            scope = list(dict.fromkeys(taxonomies))
+            unknown = [tax for tax in scope if tax not in logs]
+            if unknown or not scope:
+                raise ValueError(
+                    f'restore: taxonomies must be a non-empty subset of '
+                    f'{list(logs)}, got {list(taxonomies)}'
+                )
+        empty = ([], [])
+        cat_changes, cat_terms = (
+            logs[TAXONOMY_CATEGORY] if TAXONOMY_CATEGORY in scope else empty
+        )
+        tag_changes, tag_terms = (
+            logs[TAXONOMY_TAG] if TAXONOMY_TAG in scope else empty
+        )
+        have_any_log = any((cat_changes, cat_terms, tag_changes, tag_terms))
+        # Every taxonomy in scope needs BOTH of its logs for an inverse
+        # replay. A partial replay (e.g., post assignments only) would
+        # leave orphaned created/deleted terms behind — worse than a full
+        # snapshot undo.
+        partial_taxonomies = [
+            tax for tax in scope if bool(logs[tax][0]) != bool(logs[tax][1])
+        ]
+        have_all_logs = all(
+            logs[tax][0] and logs[tax][1] for tax in scope
+        )
 
         rlp = restore_log_path if not dry_run else None
 
@@ -2055,19 +2167,19 @@ class WpcomAdapter:
             if not have_any_log:
                 raise ValueError(
                     'restore mode=logs requires at least one of '
-                    'changes_log_path or terms_log_path to exist'
+                    'changes_log_path, terms_log_path, '
+                    'tag_changes_log_path or tag_terms_log_path to exist'
                 )
             result = self.restore_from_logs(
-                change_rows, term_rows, dry_run=dry_run,
+                cat_changes, cat_terms, dry_run=dry_run,
                 restore_log_path=rlp,
+                tag_change_rows=tag_changes, tag_term_rows=tag_terms,
             )
-        elif mode == MODE_AUTO and have_both_logs:
-            # Require BOTH logs for an inverse replay. A partial replay
-            # (e.g., post assignments only) would leave orphaned created/
-            # deleted categories behind — worse than a full snapshot undo.
+        elif mode == MODE_AUTO and have_all_logs:
             result = self.restore_from_logs(
-                change_rows, term_rows, dry_run=dry_run,
+                cat_changes, cat_terms, dry_run=dry_run,
                 restore_log_path=rlp,
+                tag_change_rows=tag_changes, tag_term_rows=tag_terms,
             )
         else:
             # Snapshot fallback.
@@ -2081,19 +2193,23 @@ class WpcomAdapter:
             with open(backup_path, encoding='utf-8') as f:
                 result = self.restore_from_snapshot(
                     json.load(f), dry_run=dry_run,
-                    restore_log_path=rlp,
+                    restore_log_path=rlp, taxonomies=scope,
                 )
-            if mode == MODE_AUTO and have_any_log and not have_both_logs:
-                present = 'terms' if term_rows else 'changes'
-                missing = 'changes' if term_rows else 'terms'
-                result['errors'].append({
-                    'op': None,
-                    'error': (
-                        f'Only the {present} log was found ({missing} '
-                        'log is missing). Fell back to full snapshot '
-                        'restore to avoid a partial revert.'
-                    ),
-                })
+            if mode == MODE_AUTO:
+                for tax in partial_taxonomies:
+                    terms = logs[tax][1]
+                    prefix = 'tag ' if tax == TAXONOMY_TAG else ''
+                    present = 'terms' if terms else 'changes'
+                    missing = 'changes' if terms else 'terms'
+                    result['errors'].append({
+                        'op': None,
+                        'error': (
+                            f'Only the {prefix}{present} log was found '
+                            f'({prefix}{missing} log is missing). Fell back '
+                            'to full snapshot restore to avoid a partial '
+                            'revert.'
+                        ),
+                    })
 
         # Surface partial failures loudly. A caller who only checks for
         # exceptions must not believe a half-done revert succeeded.
@@ -2103,13 +2219,17 @@ class WpcomAdapter:
         return result
 
     def restore_from_logs(self, change_rows, term_rows, dry_run=False,
-                          restore_log_path=None):
+                          restore_log_path=None, tag_change_rows=None,
+                          tag_term_rows=None):
         """
         Inverse-replay change and term log rows in reverse-time order.
 
         Accepts already-parsed row lists (use parse_change_log /
-        parse_terms_log from helpers.py to get them) so callers can
-        massage them first if needed. See restore() for the contract.
+        parse_terms_log from helpers.py to get them — the tag logs share
+        the same parsers) so callers can massage them first if needed.
+        Category and tag rows are merged into one stream, so a session
+        that interleaved both is undone in true reverse order. See
+        restore() for the contract.
         """
         # Tag each row with (timestamp, source-priority, position) so
         # ties within a second fall back to natural file order. Term ops
@@ -2117,12 +2237,16 @@ class WpcomAdapter:
         # (create → update → posts → delete); post changes have 1.
         # Sort ascending then reverse — that way ties also invert,
         # unlike sort(reverse=True) which preserves input order on ties.
+        sources = (
+            (term_rows, 0, SOURCE_TERM),
+            (change_rows, 1, SOURCE_CHANGE),
+            (tag_term_rows, 0, SOURCE_TAG_TERM),
+            (tag_change_rows, 1, SOURCE_TAG_CHANGE),
+        )
         combined = [
-            (r.get('timestamp', ''), 0, i, SOURCE_TERM, r)
-            for i, r in enumerate(term_rows or [])
-        ] + [
-            (r.get('timestamp', ''), 1, i, SOURCE_CHANGE, r)
-            for i, r in enumerate(change_rows or [])
+            (r.get('timestamp', ''), priority, i, source, r)
+            for rows, priority, source in sources
+            for i, r in enumerate(rows or [])
         ]
         combined.sort(key=lambda x: (x[0], x[1], x[2]))
         combined.reverse()
@@ -2363,10 +2487,141 @@ class WpcomAdapter:
             self.set_default_category(int(cat['ID']))
             return op
 
+        if source == SOURCE_TAG_CHANGE and action == ACTION_SET_TAGS:
+            post_id = int(row.get('post_id') or 0)
+            # Same slug-first resolution as SET_CATS: a '|' in a tag name
+            # can't split the key, and a tag recreated by an earlier
+            # inverse step is found by its slug, not its stale ID.
+            old_slugs_raw = row.get('old_tag_slugs')
+            by_slug = old_slugs_raw is not None
+            if by_slug:
+                keys = [s for s in old_slugs_raw.split('|') if s]
+            else:
+                keys = [
+                    n for n in (row.get('old_tags') or '').split('|') if n
+                ]
+            op = {
+                'kind': 'set_post_tags',
+                'post_id': post_id,
+                'restore_to': keys,
+                'post_title': row.get('post_title', ''),
+            }
+            if dry_run:
+                return op
+            ids = []
+            for key in keys:
+                tag = (
+                    self._lookup_tag_by_slug(key) if by_slug
+                    else self._lookup_tag_by_name(key)
+                )
+                if tag is None:
+                    key_kind = 'slug' if by_slug else 'name'
+                    raise WpcomApiError(
+                        404, 'not_found',
+                        f'Cannot restore post {post_id}: tag '
+                        f'{key_kind} "{key}" no longer exists',
+                    )
+                ids.append(int(tag['ID']))
+            # An empty list restores a post that had no tags; tags have no
+            # default-term fallback, so set_post_tags() allows it. A
+            # tags_drift error here (see set_post_tags()) is surfaced like
+            # any other failed inverse op.
+            self.set_post_tags(post_id, ids)
+            return op
+
+        if source == SOURCE_TAG_TERM and action == ACTION_CREATE_TAG:
+            # Inverse of CREATE is DELETE, looked up by slug.
+            slug = row.get('slug', '')
+            tag = self._lookup_tag_by_slug(slug)
+            op = {
+                'kind': 'delete_tag',
+                'slug': slug,
+                'term_id': tag['ID'] if tag else None,
+            }
+            if tag is None:
+                if not dry_run:
+                    op['note'] = 'tag already absent'
+                return op
+            if dry_run:
+                return op
+            self.delete_tag(int(tag['ID']))
+            err = self._verify_tag_absent(slug)
+            if err:
+                op['verification'] = err
+            return op
+
+        if source == SOURCE_TAG_TERM and action == ACTION_DELETE_TAG:
+            # Inverse of DELETE is CREATE, rehydrated from old_value JSON.
+            try:
+                snapshot = json.loads(row.get('old_value') or '{}')
+            except json.JSONDecodeError as e:
+                raise WpcomApiError(
+                    400, 'invalid_log',
+                    f'Could not parse DELETE_TAG snapshot: {e}',
+                )
+            slug = snapshot.get('slug', '')
+            op = {
+                'kind': 'create_tag',
+                'name': snapshot.get('name'),
+                'slug': slug,
+                'description': snapshot.get('description', ''),
+            }
+            if dry_run:
+                return op
+            # Idempotency: don't duplicate if revert is re-run.
+            if self._lookup_tag_by_slug(slug) is not None:
+                op['note'] = 'tag already present'
+                return op
+            self._recreate_tag(
+                snapshot.get('name', ''), slug,
+                snapshot.get('description', ''),
+            )
+            err = self._verify_tag_state(
+                slug, {'name': snapshot.get('name', '')},
+            )
+            if err:
+                op['verification'] = err
+            return op
+
+        if source == SOURCE_TAG_TERM and action == ACTION_UPDATE_TAG:
+            slug = row.get('slug', '')
+            field = row.get('field', '')
+            old_value = row.get('old_value', '')
+            op = {
+                'kind': 'update_tag',
+                'slug': slug,
+                'field': field,
+                'restore_to': old_value,
+            }
+            if dry_run:
+                return op
+            # term_id is stable across renames, so try it first. Fall
+            # back to slug lookup (pre-change slug, then new_value for
+            # slug-rename rows).
+            term_id = int(row.get('term_id') or 0)
+            tag = self._get_tag_by_id(term_id) if term_id else None
+            if tag is None:
+                tag = self._lookup_tag_by_slug(slug)
+            if tag is None and field == 'slug':
+                tag = self._lookup_tag_by_slug(row.get('new_value', ''))
+            if tag is None:
+                raise WpcomApiError(
+                    404, 'not_found',
+                    f'Cannot revert UPDATE_TAG on slug "{slug}": '
+                    'tag not found on live site',
+                )
+            self.update_tag(int(tag['ID']), {field: old_value})
+            verify_slug = old_value if field == 'slug' else slug
+            err = self._verify_tag_state(verify_slug, {field: old_value})
+            if err:
+                op['verification'] = err
+            return op
+
         return {'kind': 'unknown', 'source': source, 'action': action}
 
     def restore_from_snapshot(self, backup_data, dry_run=False,
-                              restore_log_path=None):
+                              restore_log_path=None,
+                              taxonomies=(TAXONOMY_CATEGORY,)):
         """
         Replay a full backup snapshot. Heavy-handed but works without logs.
 
@@ -2377,9 +2632,16 @@ class WpcomAdapter:
         overwriting (lib/restore.php:90), and we never use temporary
         names that can leak on crash (lib/restore.php:109).
 
+        Tags (when in `taxonomies`) are restored after categories with
+        the same steps, minus hierarchy and the default term.
+
         Args:
             backup_data: Parsed backup JSON dict (from backup() output).
             dry_run: If True, plan operations without making any writes.
+            restore_log_path: Path for the restore audit TSV (see
+                restore()).
+            taxonomies: TAXONOMY_CATEGORY and/or TAXONOMY_TAG. Defaults
+                to categories only.
 
         Returns:
             Result dict matching restore_from_logs().
@@ -2413,215 +2675,15 @@ class WpcomAdapter:
                 )
 
         with self._logging_suspended():
-            backup_cats = backup_data.get('categories', [])
-            backup_posts = backup_data.get('post_categories', [])
-            default_slug = backup_data.get('default_category_slug', '')
-
-            live_cats = self.list_categories()
-            live_by_slug = {c['slug']: c for c in live_cats}
-
-            # Step 1: recreate any missing backup categories and rename
-            # any whose name has drifted. Track whether we mutated so we
-            # only refresh the cache when something actually changed.
-            # Categories are created without parent first; hierarchy is
-            # reconciled in step 2 after all categories exist (mirroring
-            # the two-pass approach in lib/restore.php).
-            cats_mutated = False
-            for cat in backup_cats:
-                slug = cat.get('slug', '')
-                if not slug:
-                    continue
-                live = live_by_slug.get(slug)
-                if live is None:
-                    execute(
-                        {'kind': 'create_category', 'slug': slug,
-                         'name': cat.get('name', ''),
-                         'description': cat.get('description', '')},
-                        self.create_category,
-                        cat.get('name', ''), slug, cat.get('description', ''),
-                        verify=lambda s=slug: self._verify_category_state(
-                            s, {'slug': s},
-                        ),
-                    )
-                    cats_mutated = True
-                elif live.get('name') != cat.get('name'):
-                    execute(
-                        {'kind': 'update_category', 'slug': slug,
-                         'field': 'name', 'restore_to': cat.get('name', '')},
-                        self.update_category,
-                        int(live['ID']), {'name': cat.get('name', '')},
-                        verify=lambda s=slug, n=cat.get('name', ''): (
-                            self._verify_category_state(s, {'name': n})
-                        ),
-                    )
-                    cats_mutated = True
-
-            if cats_mutated and not dry_run:
-                self._invalidate_category_cache()
-                live_cats = self.list_categories()
-                live_by_slug = {c['slug']: c for c in live_cats}
-
-            # Step 2a: reconcile parent-child hierarchy. Backup parent
-            # values are the backup's term_ids, not live IDs, so we
-            # resolve via backup_id→slug→live_id.
-            backup_id_to_slug = {
-                c['term_id']: c['slug'] for c in backup_cats
-                if c.get('term_id') and c.get('slug')
-            }
-            for cat in backup_cats:
-                slug = cat.get('slug', '')
-                live = live_by_slug.get(slug)
-                if not live:
-                    continue
-                backup_parent_id = cat.get('parent', 0)
-                if backup_parent_id:
-                    parent_slug = backup_id_to_slug.get(backup_parent_id, '')
-                    parent_live = live_by_slug.get(parent_slug)
-                    desired_parent = int(parent_live['ID']) if parent_live else 0
-                else:
-                    desired_parent = 0
-                if live.get('parent', 0) != desired_parent:
-                    execute(
-                        {'kind': 'update_category', 'slug': slug,
-                         'field': 'parent', 'restore_to': desired_parent},
-                        self.update_category,
-                        int(live['ID']), {'parent': desired_parent},
-                        verify=lambda s=slug, p=desired_parent: (
-                            self._verify_category_state(s, {'parent': p})
-                        ),
-                    )
-
-            # Step 2b: reconcile descriptions.
-            for cat in backup_cats:
-                slug = cat.get('slug', '')
-                live = live_by_slug.get(slug)
-                if not live:
-                    continue
-                desired_desc = cat.get('description', '')
-                if (live.get('description') or '') != desired_desc:
-                    execute(
-                        {'kind': 'update_category', 'slug': slug,
-                         'field': 'description', 'restore_to': desired_desc},
-                        self.update_category,
-                        int(live['ID']), {'description': desired_desc},
-                        verify=lambda s=slug, d=desired_desc: (
-                            self._verify_category_state(s, {'description': d})
-                        ),
-                    )
-
-            # Step 3: restore post category assignments. Pre-collect any
-            # slugs we don't see live and refresh the cache once before
-            # the loop, instead of thrashing per-iteration.
-            needed_slugs = {
-                s
-                for pc in backup_posts
-                for s in (pc.get('category_slugs') or [])
-            }
-            if not dry_run and needed_slugs - live_by_slug.keys():
-                self._invalidate_category_cache()
-                live_cats = self.list_categories()
-                live_by_slug = {c['slug']: c for c in live_cats}
-
-            for pc in backup_posts:
-                post_id = pc.get('post_id')
-                slugs = pc.get('category_slugs', []) or []
-                op = {
-                    'kind': 'set_post_categories',
-                    'post_id': post_id,
-                    'restore_to': slugs,
-                }
-                operations.append(op)
-                if dry_run:
-                    continue
-                try:
-                    ids = []
-                    for s in slugs:
-                        live = live_by_slug.get(s)
-                        if live is None:
-                            raise WpcomApiError(
-                                404, 'not_found',
-                                f'Category slug "{s}" missing during restore',
-                            )
-                        ids.append(int(live['ID']))
-                    # Posts that had no categories at backup time must be
-                    # cleared back to empty (allow_clear), otherwise a
-                    # category the apply run added is left in place and the
-                    # snapshot no longer matches the backup.
-                    self.set_post_categories(
-                        int(post_id), ids, allow_clear=True,
-                    )
-                    if restore_log_path:
-                        self._log_restore_op(
-                            restore_log_path, op, status='ok',
-                        )
-                except WpcomApiError as e:
-                    errors.append({'op': op, 'error': str(e)})
-                    if restore_log_path:
-                        self._log_restore_op(
-                            restore_log_path, op,
-                            status='error', error=str(e),
-                        )
-
-            # Step 4: restore default category.
-            if default_slug:
-                live = live_by_slug.get(default_slug)
-                if live is not None:
-                    execute(
-                        {'kind': 'set_default_category',
-                         'restore_slug': default_slug},
-                        self.set_default_category,
-                        int(live['ID']),
-                    )
-
-            # Step 5: delete categories that exist live but not in the
-            # backup (created after the snapshot). Skip the default to
-            # avoid orphaning posts.
-            #
-            # Warning: the backup only contains published posts, so
-            # drafts/private/pending/future posts are invisible here.
-            # Deleting a category that a non-published post still
-            # references will cause WordPress to silently reassign that
-            # post to the default category.
-            backup_slugs = {c.get('slug', '') for c in backup_cats}
-            extra_slugs = [
-                c['slug'] for c in live_cats
-                if c.get('slug') and c['slug'] not in backup_slugs
-            ]
-            if extra_slugs:
-                operations.append({
-                    'kind': 'warning',
-                    'message': (
-                        f'Deleting {len(extra_slugs)} category(ies) not '
-                        'in the backup. The backup only covers published '
-                        'posts — any drafts, private, pending, or future-'
-                        'dated posts that reference these categories will '
-                        'be silently reassigned to the default category '
-                        'by WordPress.'
-                    ),
-                    'categories': extra_slugs,
-                })
-            try:
-                current_default = self.get_default_category()
-            except WpcomApiError as e:
-                if e.status_code == 404:
-                    current_default = None
-                else:
-                    raise
-            for live in live_cats:
-                slug = live.get('slug', '')
-                if not slug or slug in backup_slugs:
-                    continue
-                if current_default and live.get('ID') == current_default.get('ID'):
-                    errors.append({
-                        'op': {'kind': 'delete_category', 'slug': slug},
-                        'error': 'refusing to delete current default category',
-                    })
-                    continue
-                execute(
-                    {'kind': 'delete_category', 'slug': slug},
-                    self.delete_category,
-                    int(live['ID']),
-                    verify=lambda s=slug: self._verify_category_absent(s),
+            if TAXONOMY_CATEGORY in taxonomies:
+                self._snapshot_restore_categories(
+                    backup_data, execute, operations, errors, dry_run,
+                    restore_log_path,
+                )
+            if TAXONOMY_TAG in taxonomies:
+                self._snapshot_restore_tags(
+                    backup_data, execute, operations, errors, dry_run,
+                    restore_log_path,
                 )
 
         return {
@@ -2631,6 +2693,387 @@ class WpcomAdapter:
             'partial': bool(errors),
             'dry_run': dry_run,
         }
+
+    def _snapshot_restore_categories(self, backup_data, execute,
+                                     operations, errors, dry_run,
+                                     restore_log_path):
+        """Category steps of restore_from_snapshot()."""
+        backup_cats = backup_data.get('categories', [])
+        backup_posts = backup_data.get('post_categories', [])
+        default_slug = backup_data.get('default_category_slug', '')
+
+        live_cats = self.list_categories()
+        live_by_slug = {c['slug']: c for c in live_cats}
+
+        # Step 1: recreate any missing backup categories and rename
+        # any whose name has drifted. Track whether we mutated so we
+        # only refresh the cache when something actually changed.
+        # Categories are created without parent first; hierarchy is
+        # reconciled in step 2 after all categories exist (mirroring
+        # the two-pass approach in lib/restore.php).
+        cats_mutated = False
+        for cat in backup_cats:
+            slug = cat.get('slug', '')
+            if not slug:
+                continue
+            live = live_by_slug.get(slug)
+            if live is None:
+                execute(
+                    {'kind': 'create_category', 'slug': slug,
+                     'name': cat.get('name', ''),
+                     'description': cat.get('description', '')},
+                    self.create_category,
+                    cat.get('name', ''), slug, cat.get('description', ''),
+                    verify=lambda s=slug: self._verify_category_state(
+                        s, {'slug': s},
+                    ),
+                )
+                cats_mutated = True
+            elif live.get('name') != cat.get('name'):
+                execute(
+                    {'kind': 'update_category', 'slug': slug,
+                     'field': 'name', 'restore_to': cat.get('name', '')},
+                    self.update_category,
+                    int(live['ID']), {'name': cat.get('name', '')},
+                    verify=lambda s=slug, n=cat.get('name', ''): (
+                        self._verify_category_state(s, {'name': n})
+                    ),
+                )
+                cats_mutated = True
+
+        if cats_mutated and not dry_run:
+            self._invalidate_category_cache()
+            live_cats = self.list_categories()
+            live_by_slug = {c['slug']: c for c in live_cats}
+
+        # Step 2a: reconcile parent-child hierarchy. Backup parent
+        # values are the backup's term_ids, not live IDs, so we
+        # resolve via backup_id→slug→live_id.
+        backup_id_to_slug = {
+            c['term_id']: c['slug'] for c in backup_cats
+            if c.get('term_id') and c.get('slug')
+        }
+        for cat in backup_cats:
+            slug = cat.get('slug', '')
+            live = live_by_slug.get(slug)
+            if not live:
+                continue
+            backup_parent_id = cat.get('parent', 0)
+            if backup_parent_id:
+                parent_slug = backup_id_to_slug.get(backup_parent_id, '')
+                parent_live = live_by_slug.get(parent_slug)
+                desired_parent = int(parent_live['ID']) if parent_live else 0
+            else:
+                desired_parent = 0
+            if live.get('parent', 0) != desired_parent:
+                execute(
+                    {'kind': 'update_category', 'slug': slug,
+                     'field': 'parent', 'restore_to': desired_parent},
+                    self.update_category,
+                    int(live['ID']), {'parent': desired_parent},
+                    verify=lambda s=slug, p=desired_parent: (
+                        self._verify_category_state(s, {'parent': p})
+                    ),
+                )
+
+        # Step 2b: reconcile descriptions.
+        for cat in backup_cats:
+            slug = cat.get('slug', '')
+            live = live_by_slug.get(slug)
+            if not live:
+                continue
+            desired_desc = cat.get('description', '')
+            if (live.get('description') or '') != desired_desc:
+                execute(
+                    {'kind': 'update_category', 'slug': slug,
+                     'field': 'description', 'restore_to': desired_desc},
+                    self.update_category,
+                    int(live['ID']), {'description': desired_desc},
+                    verify=lambda s=slug, d=desired_desc: (
+                        self._verify_category_state(s, {'description': d})
+                    ),
+                )
+
+        # Step 3: restore post category assignments. Pre-collect any
+        # slugs we don't see live and refresh the cache once before
+        # the loop, instead of thrashing per-iteration.
+        needed_slugs = {
+            s
+            for pc in backup_posts
+            for s in (pc.get('category_slugs') or [])
+        }
+        if not dry_run and needed_slugs - live_by_slug.keys():
+            self._invalidate_category_cache()
+            live_cats = self.list_categories()
+            live_by_slug = {c['slug']: c for c in live_cats}
+
+        for pc in backup_posts:
+            post_id = pc.get('post_id')
+            slugs = pc.get('category_slugs', []) or []
+            op = {
+                'kind': 'set_post_categories',
+                'post_id': post_id,
+                'restore_to': slugs,
+            }
+            operations.append(op)
+            if dry_run:
+                continue
+            try:
+                ids = []
+                for s in slugs:
+                    live = live_by_slug.get(s)
+                    if live is None:
+                        raise WpcomApiError(
+                            404, 'not_found',
+                            f'Category slug "{s}" missing during restore',
+                        )
+                    ids.append(int(live['ID']))
+                # Posts that had no categories at backup time must be
+                # cleared back to empty (allow_clear), otherwise a
+                # category the apply run added is left in place and the
+                # snapshot no longer matches the backup.
+                self.set_post_categories(
+                    int(post_id), ids, allow_clear=True,
+                )
+                if restore_log_path:
+                    self._log_restore_op(
+                        restore_log_path, op, status='ok',
+                    )
+            except WpcomApiError as e:
+                errors.append({'op': op, 'error': str(e)})
+                if restore_log_path:
+                    self._log_restore_op(
+                        restore_log_path, op,
+                        status='error', error=str(e),
+                    )
+
+        # Step 4: restore default category.
+        if default_slug:
+            live = live_by_slug.get(default_slug)
+            if live is not None:
+                execute(
+                    {'kind': 'set_default_category',
+                     'restore_slug': default_slug},
+                    self.set_default_category,
+                    int(live['ID']),
+                )
+
+        # Step 5: delete categories that exist live but not in the
+        # backup (created after the snapshot). Skip the default to
+        # avoid orphaning posts.
+        #
+        # Warning: the backup only contains published posts, so
+        # drafts/private/pending/future posts are invisible here.
+        # Deleting a category that a non-published post still
+        # references will cause WordPress to silently reassign that
+        # post to the default category.
+        backup_slugs = {c.get('slug', '') for c in backup_cats}
+        extra_slugs = [
+            c['slug'] for c in live_cats
+            if c.get('slug') and c['slug'] not in backup_slugs
+        ]
+        if extra_slugs:
+            operations.append({
+                'kind': 'warning',
+                'message': (
+                    f'Deleting {len(extra_slugs)} category(ies) not '
+                    'in the backup. The backup only covers published '
+                    'posts — any drafts, private, pending, or future-'
+                    'dated posts that reference these categories will '
+                    'be silently reassigned to the default category '
+                    'by WordPress.'
+                ),
+                'categories': extra_slugs,
+            })
+        try:
+            current_default = self.get_default_category()
+        except WpcomApiError as e:
+            if e.status_code == 404:
+                current_default = None
+            else:
+                raise
+        for live in live_cats:
+            slug = live.get('slug', '')
+            if not slug or slug in backup_slugs:
+                continue
+            if current_default and live.get('ID') == current_default.get('ID'):
+                errors.append({
+                    'op': {'kind': 'delete_category', 'slug': slug},
+                    'error': 'refusing to delete current default category',
+                })
+                continue
+            execute(
+                {'kind': 'delete_category', 'slug': slug},
+                self.delete_category,
+                int(live['ID']),
+                verify=lambda s=slug: self._verify_category_absent(s),
+            )
+
+    def _snapshot_restore_tags(self, backup_data, execute, operations,
+                               errors, dry_run, restore_log_path):
+        """
+        Tag steps of restore_from_snapshot(): the category steps minus
+        hierarchy and the default term, which tags don't have.
+        """
+        # Backups taken before tag support have no tag state. Saying so
+        # beats "restoring" to zero tags, which would delete every tag
+        # on the site.
+        if 'tags' not in backup_data or 'post_tags' not in backup_data:
+            errors.append({
+                'op': None,
+                'error': (
+                    'Backup has no tag state (`tags` / `post_tags`); it '
+                    'predates tag support, so tags were not restored.'
+                ),
+            })
+            return
+        backup_tags = backup_data.get('tags') or []
+        backup_posts = backup_data.get('post_tags') or []
+
+        live_tags = self.list_tags()
+        live_by_slug = {t['slug']: t for t in live_tags}
+
+        # Step 1: recreate any missing backup tags and rename any whose
+        # name has drifted.
+        tags_mutated = False
+        for tag in backup_tags:
+            slug = tag.get('slug', '')
+            if not slug:
+                continue
+            live = live_by_slug.get(slug)
+            if live is None:
+                execute(
+                    {'kind': 'create_tag', 'slug': slug,
+                     'name': tag.get('name', ''),
+                     'description': tag.get('description', '')},
+                    self._recreate_tag,
+                    tag.get('name', ''), slug, tag.get('description', ''),
+                    verify=lambda s=slug: self._verify_tag_state(
+                        s, {'slug': s},
+                    ),
+                )
+                tags_mutated = True
+            elif live.get('name') != tag.get('name'):
+                execute(
+                    {'kind': 'update_tag', 'slug': slug,
+                     'field': 'name', 'restore_to': tag.get('name', '')},
+                    self.update_tag,
+                    int(live['ID']), {'name': tag.get('name', '')},
+                    verify=lambda s=slug, n=tag.get('name', ''): (
+                        self._verify_tag_state(s, {'name': n})
+                    ),
+                )
+                tags_mutated = True
+
+        if tags_mutated and not dry_run:
+            self._invalidate_tag_cache()
+            live_tags = self.list_tags()
+            live_by_slug = {t['slug']: t for t in live_tags}
+
+        # Step 2: reconcile descriptions.
+        for tag in backup_tags:
+            slug = tag.get('slug', '')
+            live = live_by_slug.get(slug)
+            if not live:
+                continue
+            desired_desc = tag.get('description', '')
+            if (live.get('description') or '') != desired_desc:
+                execute(
+                    {'kind': 'update_tag', 'slug': slug,
+                     'field': 'description', 'restore_to': desired_desc},
+                    self.update_tag,
+                    int(live['ID']), {'description': desired_desc},
+                    verify=lambda s=slug, d=desired_desc: (
+                        self._verify_tag_state(s, {'description': d})
+                    ),
+                )
+
+        # Step 3: restore post tag assignments. Unlike the category step,
+        # posts whose live tags already match the backup are skipped:
+        # re-sending a post's own tags can raise tags_drift (see
+        # set_post_tags()) on a site with renamed tags, which would fail
+        # posts the run never touched. Compared by slug so a dry run,
+        # which hasn't recreated anything, still previews the right posts.
+        live_post_slugs = {
+            post['ID']: {
+                t.get('slug', '') for t in (post.get('tags') or {}).values()
+                if isinstance(t, dict)
+            }
+            for post in self._iter_published_posts('ID,tags')
+        }
+        needed_slugs = {
+            s for pt in backup_posts for s in (pt.get('tag_slugs') or [])
+        }
+        if not dry_run and needed_slugs - live_by_slug.keys():
+            self._invalidate_tag_cache()
+            live_tags = self.list_tags()
+            live_by_slug = {t['slug']: t for t in live_tags}
+
+        for pt in backup_posts:
+            post_id = pt.get('post_id')
+            slugs = pt.get('tag_slugs', []) or []
+            live_slugs = live_post_slugs.get(post_id)
+            if live_slugs is not None and live_slugs == set(slugs):
+                continue
+            op = {
+                'kind': 'set_post_tags',
+                'post_id': post_id,
+                'restore_to': slugs,
+            }
+            operations.append(op)
+            if dry_run:
+                continue
+            try:
+                ids = []
+                for s in slugs:
+                    live = live_by_slug.get(s)
+                    if live is None:
+                        raise WpcomApiError(
+                            404, 'not_found',
+                            f'Tag slug "{s}" missing during restore',
+                        )
+                    ids.append(int(live['ID']))
+                # An empty list clears a post that had no tags at backup
+                # time; set_post_tags() allows that by default.
+                self.set_post_tags(int(post_id), ids)
+                if restore_log_path:
+                    self._log_restore_op(restore_log_path, op, status='ok')
+            except WpcomApiError as e:
+                errors.append({'op': op, 'error': str(e)})
+                if restore_log_path:
+                    self._log_restore_op(
+                        restore_log_path, op,
+                        status='error', error=str(e),
+                    )
+
+        # Step 4: delete tags that exist live but not in the backup
+        # (created after the snapshot). The backup only covers published
+        # posts, so a draft/private/pending/future post using one of
+        # these tags loses it. There's no default tag to fall back to.
+        backup_slugs = {t.get('slug', '') for t in backup_tags}
+        extra = [
+            t for t in live_tags
+            if t.get('slug') and t['slug'] not in backup_slugs
+        ]
+        if extra:
+            operations.append({
+                'kind': 'warning',
+                'message': (
+                    f'Deleting {len(extra)} tag(s) not in the backup. The '
+                    'backup only covers published posts — any drafts, '
+                    'private, pending, or future-dated posts that use '
+                    'these tags will lose them.'
+                ),
+                'tags': [t['slug'] for t in extra],
+            })
+        for live in extra:
+            slug = live['slug']
+            execute(
+                {'kind': 'delete_tag', 'slug': slug},
+                self.delete_tag,
+                int(live['ID']),
+                verify=lambda s=slug: self._verify_tag_absent(s),
+            )
 
 
 def _parse_changes_tsv(path):

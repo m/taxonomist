@@ -16,6 +16,8 @@ The user will identify a run by its `{timestamp}`. Find these files in the proje
 - `data/logs/changes-{timestamp}.tsv` — per-post category changes. Optional but strongly preferred.
 - `data/logs/terms-{timestamp}.tsv` — term operations (create/delete/update/set-default). Optional but strongly preferred.
 
+A tag run (`agents/tags.md`) has its own files instead: `data/backups/pre-tag-analysis-{timestamp}.json`, `data/logs/tag-changes-{timestamp}.tsv`, and `data/logs/tag-terms-{timestamp}.tsv`. Pass the tag logs as `tag_changes_log_path` / `tag_terms_log_path`. If the user doesn't say whether the run was categories or tags, look at which files exist for the timestamp.
+
 If the user did not specify a timestamp, list the most recent backups in `data/backups/` and ask which one to revert via `AskUserQuestion`.
 
 ## Detect the connection method
@@ -30,7 +32,9 @@ Read `config.json` and dispatch on `connection.method`:
 
 ## WordPress.com restore (the new path)
 
-The adapter exposes a single entry point: `WpcomAdapter.restore(backup_path, changes_log_path, terms_log_path, mode, dry_run)`. Always run dry-run first.
+The adapter exposes a single entry point: `WpcomAdapter.restore(backup_path, changes_log_path, terms_log_path, mode, dry_run, tag_changes_log_path=..., tag_terms_log_path=..., taxonomies=...)`. Always run dry-run first.
+
+Which taxonomies get reverted follows from the logs you pass: categories for `changes`/`terms` logs, tags for `tag-changes`/`tag-terms` logs, both when a run touched both. With no logs at all, a snapshot restore is category-only unless you pass `taxonomies=['post_tag']` (or `['category', 'post_tag']`). Auto mode uses inverse replay only when every taxonomy being reverted has both of its logs; otherwise it falls back to a snapshot restore of those taxonomies.
 
 ### Step 1 — Dry-run preview
 
@@ -52,6 +56,10 @@ result = adapter.restore(
     mode='auto',  # logs if present, snapshot fallback
     dry_run=True,
 )
+# For a tag run, pass the tag files instead:
+#   backup_path=f'data/backups/pre-tag-analysis-{ts}.json',
+#   tag_changes_log_path=f'data/logs/tag-changes-{ts}.tsv',
+#   tag_terms_log_path=f'data/logs/tag-terms-{ts}.tsv',
 print(json.dumps(result, indent=2))
 ```
 
@@ -66,6 +74,7 @@ Group `operations` by `kind` and present a single readable table. Highlight:
 - Category descriptions / names that would be **reverted** (`update_category`)
 - Posts whose categories would be **reassigned** (`set_post_categories`) — show count, plus a few examples
 - The **default category** restoration (`set_default_category`)
+- Tags that would be **recreated**, **deleted**, or **reverted** (`create_tag`, `delete_tag`, `update_tag`), and posts whose tags would be **reassigned** (`set_post_tags`)
 - Anything in `errors` — show all of them, even if there are many. Errors must be visible before approval.
 
 Tell the user which mode was selected and why. If `mode == 'snapshot'`, explicitly note this is the heavy-handed path: it will rewrite every post and category to match the backup, even rows the apply run didn't touch.
@@ -118,7 +127,7 @@ for op in result['operations']:
         print(f"DRIFT: {op['kind']} — {op['verification']}")
 ```
 
-Additionally, sample-check a handful of reverted posts from the live site to confirm their categories match the backup (the adapter does not do per-post read-back to avoid doubling API calls for large sites).
+Additionally, sample-check a handful of reverted posts from the live site to confirm their categories match the backup (the adapter does not do per-post read-back to avoid doubling API calls for large sites). Tag assignments are different: `set_post_tags()` already checks each post's resulting tags and fails with `tags_drift` on a mismatch, so for tags, look at `result['errors']`.
 
 If any mismatches are found, report them. The user may want to fall back to a forced snapshot restore: re-run with `mode='snapshot'`.
 

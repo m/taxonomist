@@ -31,8 +31,11 @@ from adapters.wpcom_adapter import (
     ACTION_SET_DEFAULT,
     ACTION_SET_TAGS,
     ACTION_UPDATE_TAG,
+    MODE_AUTO,
     MODE_LOGS,
     MODE_SNAPSHOT,
+    TAXONOMY_CATEGORY,
+    TAXONOMY_TAG,
     PartialRestoreError,
     WpcomAdapter,
     WpcomApiError,
@@ -1428,22 +1431,44 @@ class TestBackup(unittest.TestCase):
 class FakeWpcom(WpcomAdapter):
     """In-memory WP.com adapter for testing restore/logging logic."""
 
-    def __init__(self, cats=None, posts=None, default_id=1):
+    def __init__(self, cats=None, posts=None, default_id=1, tags=None):
         super().__init__(VALID_CONFIG)
         self.cats = dict(cats or {})
         self.posts = dict(posts or {})
+        self.tags = dict(tags or {})
         self.default_id = default_id
         self.next_id = max(
-            list(self.cats.keys()) + list(self.posts.keys()) + [0]
+            list(self.cats.keys()) + list(self.posts.keys())
+            + list(self.tags.keys()) + [0]
         ) + 100
         self._category_cache = list(self.cats.values())
+        # When True, /tags/new ignores the requested slug and derives one
+        # from the name (adding -2, -3… if taken), like /categories/new
+        # does on WordPress.com.
+        self.tag_slug_from_name = False
+        self.tag_post_writes = []
 
     def list_categories(self):
         self._category_cache = list(self.cats.values())
         return self._category_cache
 
+    def list_tags(self):
+        self._tag_cache = list(self.tags.values())
+        return self._tag_cache
+
     def _get_category_count(self):
         return len(self.cats)
+
+    def _get_tag_count(self):
+        return len(self.tags)
+
+    def _derive_tag_slug(self, name):
+        base = name.lower().replace(' ', '-')
+        taken = {t['slug'] for t in self.tags.values()}
+        slug, n = base, 2
+        while slug in taken:
+            slug, n = f'{base}-{n}', n + 1
+        return slug
 
     def _request(self, method, path, data=None, params=None,
                  override_url=None, json_body=None, idempotent=None):
@@ -1469,16 +1494,69 @@ class FakeWpcom(WpcomAdapter):
                     },
                 },
             }
+        # v1.2 + tags_by_id path used by set_post_tags.
+        if override_url and json_body and 'tags_by_id' in json_body:
+            pid = int(override_url.rstrip('/').split('/posts/')[1])
+            ids = [int(tid) for tid in json_body['tags_by_id']]
+            self.tag_post_writes.append((pid, ids))
+            tag_hash = {}
+            for tid in ids:
+                tag = self.tags.get(tid)
+                if tag is not None:
+                    tag_hash[tag['name']] = tag
+            self.posts[pid]['tags'] = tag_hash
+            return {
+                'ID': pid,
+                'terms': {
+                    'post_tag': {
+                        t['name']: {'ID': t['ID'], 'name': t['name'],
+                                    'slug': t['slug']}
+                        for t in tag_hash.values()
+                    },
+                },
+            }
         if path.endswith('/categories'):
             return {
                 'categories': list(self.cats.values()),
                 'found': len(self.cats),
             }
         if path.endswith('/tags'):
-            # No restore test exercises tag state yet — stubbed empty so
-            # backup()'s unconditional list_tags() call doesn't blow up
-            # every category-only restore test.
-            return {'tags': [], 'found': 0}
+            return {'tags': list(self.tags.values()), 'found': len(self.tags)}
+        if path.endswith('/tags/new'):
+            tid = self.next_id
+            self.next_id += 1
+            name = data.get('name', '')
+            slug = (
+                self._derive_tag_slug(name) if self.tag_slug_from_name
+                else data.get('slug') or ''
+            )
+            tag = {
+                'ID': tid, 'name': name, 'slug': slug,
+                'description': data.get('description', ''),
+                'post_count': 0,
+            }
+            self.tags[tid] = tag
+            return tag
+        if '/tags/slug:' in path and path.endswith('/delete'):
+            slug = path.split('/tags/slug:')[1].split('/')[0]
+            for tid, t in list(self.tags.items()):
+                if t['slug'] == slug:
+                    del self.tags[tid]
+                    for p in self.posts.values():
+                        (p.get('tags') or {}).pop(t['name'], None)
+                    return {'success': True}
+            raise WpcomApiError(404, 'not_found', slug)
+        if '/tags/slug:' in path:
+            slug = path.split('/tags/slug:')[1]
+            for t in self.tags.values():
+                if t['slug'] == slug:
+                    # update_tag() sends '\x00' to clear a field.
+                    t.update({
+                        k: '' if v == '\x00' else v
+                        for k, v in (data or {}).items()
+                    })
+                    return t
+            raise WpcomApiError(404, 'not_found', slug)
         if path.endswith('/categories/new'):
             tid = self.next_id
             self.next_id += 1
@@ -1512,7 +1590,8 @@ class FakeWpcom(WpcomAdapter):
             return {
                 'posts': [
                     {'ID': p['ID'], 'title': p.get('title', ''),
-                     'categories': p.get('categories', {})}
+                     'categories': p.get('categories', {}),
+                     'tags': p.get('tags', {})}
                     for p in self.posts.values()
                 ],
                 'meta': {},
@@ -3143,6 +3222,445 @@ class TestTagWriteReadBack(unittest.TestCase):
                 adapter.update_tag(42, {'description': 'new'})
         self.assertEqual(ctx.exception.error, 'connection_error')
         log.assert_not_called()
+
+
+# --- Tag restore (taxonomist#54) ---
+
+def _make_tags():
+    return {
+        50: {'ID': 50, 'name': 'WordPress', 'slug': 'wordpress',
+             'description': 'old tag desc', 'post_count': 1},
+        # Not the slug /tags/new would derive for "Wordpress" today
+        # (wordpress-2), e.g. because a tag holding wordpress-2 was
+        # deleted since.
+        51: {'ID': 51, 'name': 'Wordpress', 'slug': 'wordpress-3',
+             'description': '', 'post_count': 1},
+        52: {'ID': 52, 'name': 'PHP', 'slug': 'php',
+             'description': '', 'post_count': 1},
+    }
+
+
+def _make_tagged_posts():
+    tags = _make_tags()
+    return {
+        123: {'ID': 123, 'title': 'Hello',
+              'categories': {'Tech': _make_cats()[2]},
+              'tags': {'WordPress': tags[50], 'PHP': tags[52]}},
+        124: {'ID': 124, 'title': 'World',
+              'categories': {'Tech': _make_cats()[2]},
+              'tags': {'Wordpress': tags[51]}},
+        125: {'ID': 125, 'title': 'Untagged',
+              'categories': {'Tech': _make_cats()[2]},
+              'tags': {}},
+    }
+
+
+def _post_tag_slugs(adapter, post_id):
+    return sorted(t['slug'] for t in adapter.posts[post_id]['tags'].values())
+
+
+def _tag_state(tags):
+    return sorted(
+        (t['slug'], t['name'], t.get('description', ''))
+        for t in tags
+    )
+
+
+class TagRestoreTestCase(unittest.TestCase):
+    """Shared fixture: a site, its backup, and a logged tag-apply run."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix='taxo-test-')
+        self.changes = os.path.join(self.workdir, 'changes.tsv')
+        self.terms = os.path.join(self.workdir, 'terms.tsv')
+        self.tag_changes = os.path.join(self.workdir, 'tag-changes.tsv')
+        self.tag_terms = os.path.join(self.workdir, 'tag-terms.tsv')
+        self.backup = os.path.join(self.workdir, 'backup.json')
+        self.restore_log = os.path.join(self.workdir, 'restore.tsv')
+
+    def tearDown(self):
+        shutil.rmtree(self.workdir)
+
+    def _adapter(self):
+        adapter = FakeWpcom(
+            cats=_make_cats(), posts=_make_tagged_posts(), tags=_make_tags(),
+        )
+        adapter.backup(self.backup)
+        return adapter
+
+    def _apply_tag_run(self, adapter):
+        """Merge wordpress-3 into wordpress, tag post 125, add a tag."""
+        adapter.set_logging(
+            tag_changes_log_path=self.tag_changes,
+            tag_terms_log_path=self.tag_terms,
+        )
+        new = adapter.create_tag('Gutenberg', 'gutenberg', 'blocks')
+        adapter.update_tag(50, {'description': 'new tag desc'})
+        adapter.set_post_tags(
+            124, [50], old_tag_ids=[51], post_title='World',
+        )
+        adapter.set_post_tags(
+            125, [int(new['ID'])], old_tag_ids=[], post_title='Untagged',
+        )
+        adapter.set_post_tags(
+            123, [50], old_tag_ids=[50, 52], post_title='Hello',
+        )
+        adapter.delete_tag(51)
+        adapter.set_logging()
+
+    def _baseline(self):
+        with open(self.backup) as f:
+            return json.load(f)
+
+    def _assert_tags_match_backup(self, adapter):
+        baseline = self._baseline()
+        self.assertEqual(
+            _tag_state(adapter.tags.values()), _tag_state(baseline['tags']),
+        )
+        for pt in baseline['post_tags']:
+            self.assertEqual(
+                _post_tag_slugs(adapter, pt['post_id']),
+                sorted(pt['tag_slugs']),
+                f'post {pt["post_id"]}',
+            )
+
+
+class TestTagRestoreFromLogs(TagRestoreTestCase):
+    """Inverse replay of tag-changes / tag-terms logs."""
+
+    def test_round_trip(self):
+        adapter = self._adapter()
+        self._apply_tag_run(adapter)
+        result = adapter.restore(
+            backup_path=self.backup,
+            tag_changes_log_path=self.tag_changes,
+            tag_terms_log_path=self.tag_terms,
+            mode=MODE_LOGS, dry_run=False,
+            restore_log_path=self.restore_log,
+        )
+        self.assertFalse(result['errors'])
+        self.assertEqual(result['mode'], MODE_LOGS)
+        kinds = {op['kind'] for op in result['operations']}
+        self.assertEqual(
+            kinds,
+            {'create_tag', 'delete_tag', 'update_tag', 'set_post_tags'},
+        )
+        self._assert_tags_match_backup(adapter)
+        with open(self.restore_log) as f:
+            self.assertIn('set_post_tags', f.read())
+
+    def test_auto_mode_replays_tag_logs_without_category_logs(self):
+        """A tag-only run has no category logs. Auto mode must still pick
+        inverse replay for it, and leave categories alone."""
+        adapter = self._adapter()
+        self._apply_tag_run(adapter)
+        # A category change outside the tag run must survive the revert.
+        adapter.update_category(2, {'description': 'unrelated edit'})
+        result = adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            tag_changes_log_path=self.tag_changes,
+            tag_terms_log_path=self.tag_terms,
+            mode=MODE_AUTO, dry_run=False,
+        )
+        self.assertEqual(result['mode'], MODE_LOGS)
+        self._assert_tags_match_backup(adapter)
+        self.assertEqual(adapter.cats[2]['description'], 'unrelated edit')
+
+    def test_recreated_tag_gets_its_original_slug_back(self):
+        """/tags/new derives the slug from the name. A deleted tag whose
+        slug isn't the one it would derive now (`wordpress-3` for
+        "Wordpress", which would come back as `wordpress-2`) must come
+        back under its original slug, or restoring post 124 by slug
+        fails."""
+        adapter = self._adapter()
+        self._apply_tag_run(adapter)
+        adapter.tag_slug_from_name = True
+        result = adapter.restore(
+            tag_changes_log_path=self.tag_changes,
+            tag_terms_log_path=self.tag_terms,
+            mode=MODE_LOGS, dry_run=False,
+        )
+        self.assertFalse(result['errors'])
+        self.assertEqual(_post_tag_slugs(adapter, 124), ['wordpress-3'])
+        self._assert_tags_match_backup(adapter)
+
+    def test_revert_handles_pipe_in_tag_name(self):
+        tags = {60: {'ID': 60, 'name': 'Tips | Tricks', 'slug': 'tips-tricks',
+                     'description': '', 'post_count': 1},
+                61: {'ID': 61, 'name': 'Misc', 'slug': 'misc',
+                     'description': '', 'post_count': 0}}
+        posts = {123: {'ID': 123, 'title': 'Hello', 'categories': {},
+                       'tags': {'Tips | Tricks': tags[60]}}}
+        adapter = FakeWpcom(cats=_make_cats(), posts=posts, tags=tags)
+        adapter.set_logging(
+            tag_changes_log_path=self.tag_changes,
+            tag_terms_log_path=self.tag_terms,
+        )
+        adapter.set_post_tags(123, [61], old_tag_ids=[60], post_title='Hello')
+        adapter.set_logging()
+        result = adapter.restore(
+            tag_changes_log_path=self.tag_changes,
+            mode=MODE_LOGS, dry_run=False,
+        )
+        self.assertFalse(result['errors'])
+        self.assertEqual(_post_tag_slugs(adapter, 123), ['tips-tricks'])
+
+    def test_dry_run_makes_no_changes(self):
+        adapter = self._adapter()
+        self._apply_tag_run(adapter)
+        tags_before = _tag_state(adapter.tags.values())
+        writes_before = len(adapter.tag_post_writes)
+        result = adapter.restore(
+            tag_changes_log_path=self.tag_changes,
+            tag_terms_log_path=self.tag_terms,
+            mode=MODE_LOGS, dry_run=True,
+        )
+        self.assertTrue(result['dry_run'])
+        self.assertTrue(result['operations'])
+        self.assertEqual(_tag_state(adapter.tags.values()), tags_before)
+        self.assertEqual(len(adapter.tag_post_writes), writes_before)
+
+    def test_interleaved_category_and_tag_runs(self):
+        """Category and tag rows are replayed as one reverse-time stream."""
+        adapter = self._adapter()
+        adapter.set_logging(
+            self.changes, self.terms, self.tag_changes, self.tag_terms,
+        )
+        adapter.create_category('Remote Work', 'remote-work')
+        new_cat = max(adapter.cats.keys())
+        adapter.set_post_categories(
+            123, [new_cat], old_category_ids=[2], post_title='Hello',
+        )
+        adapter.set_post_tags(
+            123, [52], old_tag_ids=[50, 52], post_title='Hello',
+        )
+        adapter.delete_tag(50)
+        adapter.set_logging()
+
+        result = adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            tag_changes_log_path=self.tag_changes,
+            tag_terms_log_path=self.tag_terms,
+            dry_run=False,
+        )
+        self.assertEqual(result['mode'], MODE_LOGS)
+        self.assertFalse(result['errors'])
+        self.assertEqual(
+            sorted(c['slug'] for c in adapter.cats.values()),
+            ['general', 'tech'],
+        )
+        self.assertEqual(
+            [c['slug'] for c in adapter.posts[123]['categories'].values()],
+            ['tech'],
+        )
+        self._assert_tags_match_backup(adapter)
+
+    def test_tags_drift_on_restore_is_reported(self):
+        """A post whose restore lands on the wrong tag surfaces an error
+        instead of a clean result."""
+        adapter = self._adapter()
+        self._apply_tag_run(adapter)
+        real_request = adapter._request
+
+        def drifting_request(method, path, data=None, params=None,
+                             override_url=None, json_body=None,
+                             idempotent=None):
+            if json_body and 'tags_by_id' in json_body:
+                json_body = {'tags_by_id': [52]}
+            return real_request(method, path, data, params, override_url,
+                                json_body, idempotent)
+
+        adapter._request = drifting_request
+        with self.assertRaises(PartialRestoreError) as ctx:
+            adapter.restore(
+                tag_changes_log_path=self.tag_changes,
+                tag_terms_log_path=self.tag_terms,
+                mode=MODE_LOGS, dry_run=False,
+            )
+        self.assertTrue(any(
+            'tags_drift' in e['error'] for e in ctx.exception.result['errors']
+        ))
+
+
+class TestTagRestoreAutoMode(TagRestoreTestCase):
+    """restore()'s taxonomy scope and auto-mode selection with tags."""
+
+    def test_one_tag_log_falls_back_to_snapshot_with_tags(self):
+        adapter = self._adapter()
+        self._apply_tag_run(adapter)
+        os.unlink(self.tag_terms)
+        result = adapter.restore(
+            backup_path=self.backup,
+            tag_changes_log_path=self.tag_changes,
+            tag_terms_log_path=self.tag_terms,
+            dry_run=True,
+        )
+        self.assertEqual(result['mode'], MODE_SNAPSHOT)
+        warnings = [e for e in result['errors'] if e.get('op') is None]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('tag terms log is missing', warnings[0]['error'])
+        # Tags are in the snapshot's scope; categories are not.
+        kinds = {op['kind'] for op in result['operations']}
+        self.assertIn('create_tag', kinds)
+        self.assertFalse(any('category' in k for k in kinds))
+
+    def test_partial_tag_logs_with_full_category_logs_uses_snapshot(self):
+        adapter = self._adapter()
+        adapter.set_logging(self.changes, self.terms, self.tag_changes)
+        adapter.create_category('X', 'x')
+        adapter.set_post_categories(
+            123, [1], old_category_ids=[2], post_title='Hello',
+        )
+        adapter.set_post_tags(123, [52], old_tag_ids=[50, 52])
+        adapter.set_logging()
+        result = adapter.restore(
+            backup_path=self.backup,
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            tag_changes_log_path=self.tag_changes,
+            tag_terms_log_path=self.tag_terms,
+            dry_run=True,
+        )
+        self.assertEqual(result['mode'], MODE_SNAPSHOT)
+        warnings = [e for e in result['errors'] if e.get('op') is None]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('tag changes log was found', warnings[0]['error'])
+
+    def test_no_logs_snapshot_leaves_tags_alone(self):
+        """Without logs or an explicit scope, a snapshot revert stays
+        category-only, as it was before tags could be restored."""
+        adapter = self._adapter()
+        adapter.create_category('X', 'x')
+        adapter.create_tag('Later', 'later')
+        adapter.set_post_tags(123, [52], old_tag_ids=[50, 52])
+        result = adapter.restore(backup_path=self.backup, dry_run=False)
+        self.assertEqual(result['mode'], MODE_SNAPSHOT)
+        self.assertNotIn('x', {c['slug'] for c in adapter.cats.values()})
+        self.assertIn('later', {t['slug'] for t in adapter.tags.values()})
+        self.assertEqual(_post_tag_slugs(adapter, 123), ['php'])
+
+    def test_explicit_taxonomies_limit_log_replay(self):
+        adapter = self._adapter()
+        adapter.set_logging(
+            self.changes, self.terms, self.tag_changes, self.tag_terms,
+        )
+        adapter.create_category('X', 'x')
+        adapter.create_tag('Later', 'later')
+        adapter.set_logging()
+        result = adapter.restore(
+            changes_log_path=self.changes,
+            terms_log_path=self.terms,
+            tag_changes_log_path=self.tag_changes,
+            tag_terms_log_path=self.tag_terms,
+            mode=MODE_LOGS, dry_run=False,
+            taxonomies=[TAXONOMY_TAG],
+        )
+        self.assertFalse(result['errors'])
+        self.assertIn('x', {c['slug'] for c in adapter.cats.values()})
+        self.assertNotIn('later', {t['slug'] for t in adapter.tags.values()})
+
+    def test_unknown_taxonomy_raises(self):
+        adapter = self._adapter()
+        with self.assertRaises(ValueError):
+            adapter.restore(backup_path=self.backup, taxonomies=['tags'])
+        with self.assertRaises(ValueError):
+            adapter.restore(backup_path=self.backup, taxonomies=[])
+
+
+class TestTagRestoreFromSnapshot(TagRestoreTestCase):
+    """Snapshot restore of `tags` / `post_tags`."""
+
+    def test_round_trip(self):
+        adapter = self._adapter()
+        self._apply_tag_run(adapter)
+        adapter.update_tag(52, {'name': 'PHP Lang'})
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=False,
+            taxonomies=[TAXONOMY_TAG],
+            restore_log_path=self.restore_log,
+        )
+        self.assertFalse(result['errors'])
+        self._assert_tags_match_backup(adapter)
+        with open(self.restore_log) as f:
+            self.assertIn('delete_tag', f.read())
+
+    def test_recreated_tag_gets_its_original_slug_back(self):
+        adapter = self._adapter()
+        self._apply_tag_run(adapter)
+        adapter.tag_slug_from_name = True
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=False,
+            taxonomies=[TAXONOMY_TAG],
+        )
+        self.assertFalse(result['errors'])
+        self._assert_tags_match_backup(adapter)
+
+    def test_skips_posts_whose_tags_already_match(self):
+        """Re-sending a post's own tags can raise tags_drift on sites with
+        renamed tags, so only posts that differ from the backup are
+        written."""
+        adapter = self._adapter()
+        adapter.set_post_tags(124, [50])
+        adapter.tag_post_writes.clear()
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=False,
+            taxonomies=[TAXONOMY_TAG],
+        )
+        self.assertFalse(result['errors'])
+        self.assertEqual(adapter.tag_post_writes, [(124, [51])])
+        ops = [op for op in result['operations']
+               if op['kind'] == 'set_post_tags']
+        self.assertEqual([op['post_id'] for op in ops], [124])
+
+    def test_dry_run_previews_without_writing(self):
+        adapter = self._adapter()
+        self._apply_tag_run(adapter)
+        tags_before = _tag_state(adapter.tags.values())
+        adapter.tag_post_writes.clear()
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=True,
+            taxonomies=[TAXONOMY_TAG],
+        )
+        self.assertEqual(_tag_state(adapter.tags.values()), tags_before)
+        self.assertEqual(adapter.tag_post_writes, [])
+        posts = sorted(op['post_id'] for op in result['operations']
+                       if op['kind'] == 'set_post_tags')
+        self.assertEqual(posts, [123, 124, 125])
+
+    def test_both_taxonomies(self):
+        adapter = self._adapter()
+        self._apply_tag_run(adapter)
+        adapter.create_category('X', 'x')
+        result = adapter.restore(
+            backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=False,
+            taxonomies=[TAXONOMY_CATEGORY, TAXONOMY_TAG],
+        )
+        self.assertFalse(result['errors'])
+        self.assertNotIn('x', {c['slug'] for c in adapter.cats.values()})
+        self._assert_tags_match_backup(adapter)
+
+    def test_backup_without_tags_is_an_error_not_a_wipe(self):
+        """A backup from before tag support has no `tags` key. Treating
+        that as "zero tags" would delete every tag on the site."""
+        adapter = self._adapter()
+        baseline = self._baseline()
+        del baseline['tags']
+        del baseline['post_tags']
+        with open(self.backup, 'w') as f:
+            json.dump(baseline, f)
+        with self.assertRaises(PartialRestoreError) as ctx:
+            adapter.restore(
+                backup_path=self.backup, mode=MODE_SNAPSHOT, dry_run=False,
+                taxonomies=[TAXONOMY_TAG],
+            )
+        self.assertIn('no tag state', ctx.exception.result['errors'][0]['error'])
+        self.assertEqual(
+            _tag_state(adapter.tags.values()), _tag_state(_make_tags().values()),
+        )
 
 
 if __name__ == '__main__':
