@@ -34,6 +34,7 @@ from helpers import (
     validate_backup,
     validate_category_ids,
     validate_export,
+    validate_no_catchall_categories,
     validate_result_ids,
     validate_suggestions,
     validate_tag_ids,
@@ -1297,6 +1298,65 @@ class TestValidateCategoryIds(unittest.TestCase):
         check = validate_category_ids(suggestions, {12})
         self.assertTrue(check['valid'])
 
+
+
+class TestValidateNoCatchallCategories(unittest.TestCase):
+    """Tests for the catch-all category gate (issue #45).
+
+    agents/analyze.md tells analyze agents not to suggest catch-all
+    categories, but haiku batches still do. This gate turns that into a
+    validation error instead of something a human has to spot in review.
+    """
+
+    def test_no_catchall_passes(self):
+        suggestions = [
+            {'post_id': 1, 'cats': [12, 34]},
+            {'post_id': 2, 'cats': [56]},
+        ]
+        check = validate_no_catchall_categories(suggestions, {1, 7})
+        self.assertTrue(check['valid'])
+        self.assertEqual(check['flagged_posts'], {})
+        self.assertEqual(check['errors'], [])
+
+    def test_flags_catchall_suggestions(self):
+        """Regression for #45: posts given the site default ("Asides")
+        must fail validation, with the offending post IDs reported."""
+        asides = 7
+        suggestions = [
+            {'post_id': 101, 'cats': [12, asides]},
+            {'post_id': 102, 'cats': [34]},
+            {'post_id': 103, 'cats': [asides]},
+        ]
+        check = validate_no_catchall_categories(suggestions, {1, asides})
+        self.assertFalse(check['valid'])
+        self.assertEqual(check['flagged_posts'], {101: [asides], 103: [asides]})
+        self.assertEqual(check['catchall_counts'][asides], 2)
+        self.assertEqual(len(check['errors']), 1)
+        self.assertIn('101', check['errors'][0])
+        self.assertIn('103', check['errors'][0])
+
+    def test_reports_every_catchall_on_a_post(self):
+        suggestions = [{'post_id': 5, 'cats': [7, 12, 1]}]
+        check = validate_no_catchall_categories(suggestions, {1, 7})
+        self.assertFalse(check['valid'])
+        self.assertEqual(check['flagged_posts'], {5: [1, 7]})
+
+    def test_accepts_any_iterable_of_ids(self):
+        suggestions = [{'post_id': 5, 'cats': [7]}]
+        check = validate_no_catchall_categories(suggestions, [7])
+        self.assertFalse(check['valid'])
+
+    def test_empty_catchall_ids_passes(self):
+        suggestions = [{'post_id': 1, 'cats': [12]}]
+        check = validate_no_catchall_categories(suggestions, set())
+        self.assertTrue(check['valid'])
+
+    def test_empty_suggestions_and_cats(self):
+        self.assertTrue(validate_no_catchall_categories([], {1})['valid'])
+        check = validate_no_catchall_categories(
+            [{'post_id': 1, 'cats': []}], {1}
+        )
+        self.assertTrue(check['valid'])
 
 def _cat(term_id, name, slug, count=0, parent=0):
     """Shorthand for building a category dict in tests."""

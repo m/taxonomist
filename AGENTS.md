@@ -238,7 +238,36 @@ if not check['valid']:
 Any unknown term IDs must be resolved (a stale ID from a re-exported
 taxonomy, or a new category the user hasn't approved yet) before applying.
 
-### 3. Category distribution review
+### 3. Catch-all category check
+
+`agents/analyze.md` tells analyze agents not to suggest catch-all
+categories, but they sometimes do anyway. Treat any catch-all in a
+suggestion's `cats` as a validation error, not something to spot later in
+the distribution counts. Catch-alls are the site's default category (from
+the pre-analysis backup's `default_category_slug`) plus every category
+named in `agents/analyze.md`'s do-not-suggest list.
+
+```python
+from helpers import validate_no_catchall_categories
+catchall_names = {'uncategorized', 'asides'}  # keep in sync with agents/analyze.md
+catchall_ids = {
+    cat['term_id'] for cat in categories
+    if cat['slug'] == backup['default_category_slug']
+    or cat['name'].lower() in catchall_names
+}
+check = validate_no_catchall_categories(all_suggestions, catchall_ids)
+if not check['valid']:
+    for error in check['errors']:
+        print(error)
+```
+
+Every post in `flagged_posts` must be re-analyzed (re-run its batch) or
+reclassified with the user before applying. Do NOT just strip the
+catch-all ID from `cats`: if it was the only suggestion, that leaves an
+empty list, and an empty `cats` wipes the post's categories at apply time
+(see `agents/apply.md`).
+
+### 4. Category distribution review
 
 After aggregating results, review the category frequency counts. Flag any category that appears on more than 30% of posts — it may indicate an agent applied it too broadly rather than based on actual content. Common over-application patterns:
 - A **narrow category** applied to anything vaguely related (e.g., a "books" category applied to any bookmarked link, not just actual book references)

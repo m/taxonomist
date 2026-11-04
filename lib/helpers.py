@@ -750,6 +750,58 @@ def validate_category_ids(suggestions, valid_ids):
     }
 
 
+def validate_no_catchall_categories(suggestions, catchall_ids):
+    """
+    Flag suggestions that put a post in a catch-all category.
+
+    agents/analyze.md tells analyze agents not to suggest catch-all
+    categories (the site default, "Uncategorized", "Asides", …), but in
+    practice they sometimes do anyway. Nothing else in the validation
+    pipeline catches it, so without this gate those posts only surface if
+    a human happens to spot them during plan review (issue #45).
+
+    Args:
+        suggestions: List of suggestion dicts (each with a 'cats' list of
+            integer term IDs).
+        catchall_ids: Iterable of catch-all category term IDs (ints) —
+            the site's default category plus any category named in the
+            analyze prompt's do-not-suggest list.
+
+    Returns:
+        A dict with keys:
+            valid (bool): True if no suggestion uses a catch-all category.
+            flagged_posts (dict[int, list[int]]): post_id -> sorted
+                catch-all term IDs suggested for that post.
+            catchall_counts (Counter): catch-all term ID -> count of
+                occurrences.
+            errors (list[str]): Human-readable error descriptions.
+    """
+    catchall_ids = set(catchall_ids)
+    flagged = {}
+    counts = Counter()
+    for entry in suggestions:
+        hits = sorted(set(entry.get('cats', [])) & catchall_ids)
+        if hits:
+            flagged[entry.get('post_id')] = hits
+            counts.update(hits)
+
+    errors = []
+    if flagged:
+        post_ids = sorted(flagged, key=str)
+        errors.append(
+            f'{len(flagged)} post(s) suggested a catch-all category ('
+            + ', '.join(f'{cid} ({n}x)' for cid, n in counts.most_common(10))
+            + f'): {post_ids[:20]}{"…" if len(post_ids) > 20 else ""}'
+        )
+
+    return {
+        'valid': len(errors) == 0,
+        'flagged_posts': flagged,
+        'catchall_counts': counts,
+        'errors': errors,
+    }
+
+
 def validate_tag_ids(suggestions, valid_ids):
     """
     Check that every tag term ID in the suggestions is recognized.
