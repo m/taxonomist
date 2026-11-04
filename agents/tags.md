@@ -228,7 +228,7 @@ Expect the same per-call latency (20–30s) and occasional `remote_request_timeo
 ```python
 # Preview (default mode)
 print(adapter.apply_tag_changes(
-    'data/tag-suggestions.json', f'data/logs/tag-changes-{ts}.tsv',
+    'data/tag-suggestions.json', f'data/logs/tag-preview-{ts}.tsv',
 ))
 
 # Apply
@@ -238,9 +238,11 @@ print(adapter.apply_tag_changes(
 ))
 ```
 
+Give every run its own log path, using a fresh `{ts}` for each one. `apply_tag_changes()` refuses a path that already exists, because the script overwrites its log and a re-run skips posts that were already changed, so their rows would be lost. A preview writes the same `SET_TAGS` rows as an apply, which is why it goes to a `tag-preview-*` file: never read one as a record of real changes.
+
 Over SSH, `apply_tag_changes()` uploads the script and the suggestions file, then copies the change log back to the local path, including when the run fails. That log is the only post-level record for a tag revert. If the copy back fails, the call raises an error naming the path still on the server: fetch that file before doing anything else.
 
-**If a run reports any errors, STOP and report them. Do not delete any tags.** Tag mode exits non-zero when `Errors` is above 0, so `apply_tag_changes()` raises. A post that failed keeps its old tags and gets no log row, so deleting a retired tag at that point would remove the tag from that post with no record of it. Fix the cause and re-run before moving on to deletes, the same rule as the Safety section of `agents/apply.md`.
+**If a run reports any errors, STOP and report them. Do not delete any tags.** Tag mode exits non-zero when `Errors` is above 0, so `apply_tag_changes()` raises. A post that failed keeps its old tags and gets no log row, so deleting a retired tag at that point would remove the tag from that post with no record of it. Fix the cause and re-run with a new log path before moving on to deletes, the same rule as the Safety section of `agents/apply.md`. Keep the failed run's log too: together the logs are the record of what changed.
 
 Tag mode replaces each post's tag set rather than adding to it, rejects any entry without a `tags` list, and writes `SET_TAGS` rows with the same columns as the WordPress.com tag change log. Create and delete tags with `WpCliAdapter.create_tag()` / `delete_tag(term_id)`, in the same order as above. WordPress resolves the integer tag IDs by ID, so `tags_drift` does not apply to WP-CLI runs and the smoke test below is only needed for WordPress.com.
 

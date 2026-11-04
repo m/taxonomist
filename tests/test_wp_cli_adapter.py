@@ -264,6 +264,16 @@ class TestRunScript(unittest.TestCase):
         mock_run.assert_not_called()
 
     @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_refuses_to_overwrite_an_existing_log(self, mock_run):
+        """A retry or a later preview must not wipe an earlier run's log."""
+        with tempfile.NamedTemporaryFile(suffix='.tsv') as existing:
+            with self.assertRaises(ValueError):
+                WpCliAdapter(_ssh_config()).apply_tag_changes(
+                    'in.json', existing.name, mode='apply',
+                )
+        mock_run.assert_not_called()
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
     def test_ssh_log_is_copied_back_when_the_script_fails(self, mock_run):
         """A partial apply still changed posts, so its log must come back."""
         mock_run.side_effect = lambda argv, **_: _failing_call(argv, 'eval-file')

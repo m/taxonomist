@@ -232,9 +232,16 @@ class WpCliAdapter:
 
         mode is 'preview' or 'apply'. See apply-changes.php for the
         suggestions format. Returns the script's stdout.
+
+        log_path must not exist yet. The script overwrites its log, and
+        the file may be the only record of an earlier run's changes.
         """
         if mode not in ('preview', 'apply'):
             raise ValueError(f'mode must be preview or apply, got {mode!r}')
+        if os.path.exists(log_path):
+            raise ValueError(
+                f'{log_path} already exists. Give each run its own log path.'
+            )
         return self._run_script(
             'apply-changes.php',
             inputs={'TAXONOMIST_SUGGESTIONS': suggestions_path},
