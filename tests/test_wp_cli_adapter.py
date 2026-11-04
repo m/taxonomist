@@ -8,6 +8,7 @@ subprocess.run is patched so no real commands execute.
 
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -184,6 +185,124 @@ class TestExportUploadsScript(unittest.TestCase):
         ]
         self.assertTrue(evalfile_cmds, f'no eval-file ssh call: {calls}')
         self.assertNotIn('lib/export-posts.php', evalfile_cmds[0])
+
+
+def _failing_call(argv, needle):
+    """A subprocess.run side effect failing calls that contain `needle`."""
+    result = _ok_run()
+    if any(needle in str(arg) for arg in argv):
+        result.returncode = 1
+        result.stderr = 'boom'
+    return result
+
+
+def _env_path(remote_cmd, key):
+    """Pull a remote path out of the `KEY=value` prefix of an ssh command."""
+    return remote_cmd.split(f'{key}=')[1].split()[0]
+
+
+class TestRunScript(unittest.TestCase):
+    """backup() and apply_tag_changes() run bundled scripts the same way
+    export_posts() does, and must not lose the output when something fails."""
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_local_paths_are_made_absolute(self, mock_run):
+        """Commands run from wp_path, so a relative path would land there
+        instead of in the repo."""
+        mock_run.return_value = _ok_run()
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                WpCliAdapter(_local_config()).backup('data/backup.json')
+                self.assertTrue(os.path.isdir('data'))
+            finally:
+                os.chdir(original_cwd)
+        env = mock_run.call_args[1]['env']
+        self.assertTrue(os.path.isabs(env['TAXONOMIST_OUTPUT']))
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_ssh_backup_uploads_script_and_copies_output_back(self, mock_run):
+        mock_run.return_value = _ok_run()
+        with tempfile.TemporaryDirectory() as tmp:
+            local = os.path.join(tmp, 'backup.json')
+            WpCliAdapter(_ssh_config()).backup(local)
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        self.assertEqual(calls[0][0], 'scp')
+        self.assertTrue(calls[0][2].endswith('backup.php'))
+        eval_cmd = next(c[-1] for c in calls if 'eval-file' in c[-1])
+        remote_output = _env_path(eval_cmd, 'TAXONOMIST_OUTPUT')
+        self.assertIn(
+            ['scp', '--', f'root@example.com:{remote_output}', local], calls,
+        )
+        self.assertIn(remote_output, calls[-1][-1])
+        self.assertIn('rm -f', calls[-1][-1])
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_ssh_apply_uploads_suggestions_and_sets_tag_mode(self, mock_run):
+        mock_run.return_value = _ok_run()
+        with tempfile.TemporaryDirectory() as tmp:
+            WpCliAdapter(_ssh_config()).apply_tag_changes(
+                os.path.join(tmp, 'tag-suggestions.json'),
+                os.path.join(tmp, 'tag-changes.tsv'),
+                mode='apply',
+            )
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        eval_cmd = next(c[-1] for c in calls if 'eval-file' in c[-1])
+        self.assertIn('TAXONOMIST_TAXONOMY=post_tag', eval_cmd)
+        self.assertIn('TAXONOMIST_MODE=apply', eval_cmd)
+        remote_input = _env_path(eval_cmd, 'TAXONOMIST_SUGGESTIONS')
+        uploads = [c for c in calls if c[0] == 'scp' and remote_input in c[-1]]
+        self.assertTrue(uploads, f'suggestions not uploaded: {calls}')
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_rejects_unknown_mode(self, mock_run):
+        with self.assertRaises(ValueError):
+            WpCliAdapter(_ssh_config()).apply_tag_changes(
+                'in.json', 'log.tsv', mode='aply',
+            )
+        mock_run.assert_not_called()
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_ssh_log_is_copied_back_when_the_script_fails(self, mock_run):
+        """A partial apply still changed posts, so its log must come back."""
+        mock_run.side_effect = lambda argv, **_: _failing_call(argv, 'eval-file')
+        with tempfile.TemporaryDirectory() as tmp:
+            local_log = os.path.join(tmp, 'tag-changes.tsv')
+            with self.assertRaisesRegex(Exception, 'boom'):
+                WpCliAdapter(_ssh_config()).apply_tag_changes(
+                    os.path.join(tmp, 'in.json'), local_log, mode='apply',
+                )
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        self.assertTrue(
+            [c for c in calls if c[0] == 'scp' and c[-1] == local_log],
+            f'log not copied back: {calls}',
+        )
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_ssh_output_stays_on_server_when_copy_back_fails(self, mock_run):
+        """The remote file may be the only copy, so never delete it unless
+        it reached the local machine, and say where it is."""
+        def fail_copy_back(argv, **_):
+            result = _ok_run()
+            if argv[0] == 'scp' and str(argv[-1]).endswith('.tsv'):
+                result.returncode = 1
+            return result
+
+        mock_run.side_effect = fail_copy_back
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(Exception) as caught:
+                WpCliAdapter(_ssh_config()).apply_tag_changes(
+                    os.path.join(tmp, 'in.json'),
+                    os.path.join(tmp, 'tag-changes.tsv'),
+                    mode='apply',
+                )
+        calls = [c.args[0] for c in mock_run.call_args_list]
+        eval_cmd = next(c[-1] for c in calls if 'eval-file' in c[-1])
+        remote_log = _env_path(eval_cmd, 'TAXONOMIST_LOG')
+        self.assertIn(remote_log, str(caught.exception))
+        self.assertNotIn(remote_log, calls[-1][-1])
+        self.assertIn('rm -f', calls[-1][-1])
 
 
 class TestTagMethods(unittest.TestCase):

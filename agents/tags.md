@@ -84,13 +84,7 @@ ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
 adapter.backup(f'data/backups/pre-tag-analysis-{ts}.json')
 ```
 
-WP-CLI:
-
-```bash
-TAXONOMIST_OUTPUT=data/backups/pre-tag-analysis-{timestamp}.json wp eval-file lib/backup.php
-```
-
-Over SSH, run it on the server with a remote output path and copy the file back, the same way the category backup does in `agents/export.md`.
+On `wp-cli-ssh` / `wp-cli-local` the same call works. `WpCliAdapter.backup()` uploads `lib/backup.php` over SSH and copies the backup back to the local path.
 
 **Validate it immediately, matching the hard-gate requirement in `agents/export.md`'s Backup section** — `lib.helpers.validate_backup()` doesn't check `tags`/`post_tags` specifically (they're additive fields, not in its required-keys list), but it does verify the backup is well-formed JSON with the base structure intact. Run it and STOP if invalid, same as the category pass.
 
@@ -229,20 +223,20 @@ Expect the same per-call latency (20–30s) and occasional `remote_request_timeo
 
 **WP-CLI.** Use `lib/apply-changes.php` in tag mode for the post reassignments (step 3 above), not a loop of `set_post_tags()` calls. Build one suggestions file from the approved plan where each entry's `tags` is the post's complete new tag list (`[]` clears it), then preview before applying:
 
-```bash
+```python
 # Preview (default mode)
-TAXONOMIST_TAXONOMY=post_tag \
-TAXONOMIST_SUGGESTIONS=data/tag-suggestions.json \
-TAXONOMIST_LOG=data/logs/tag-changes-{timestamp}.tsv \
-wp eval-file lib/apply-changes.php
+print(adapter.apply_tag_changes(
+    'data/tag-suggestions.json', f'data/logs/tag-changes-{ts}.tsv',
+))
 
 # Apply
-TAXONOMIST_TAXONOMY=post_tag \
-TAXONOMIST_MODE=apply \
-TAXONOMIST_SUGGESTIONS=data/tag-suggestions.json \
-TAXONOMIST_LOG=data/logs/tag-changes-{timestamp}.tsv \
-wp eval-file lib/apply-changes.php
+print(adapter.apply_tag_changes(
+    'data/tag-suggestions.json', f'data/logs/tag-changes-{ts}.tsv',
+    mode='apply',
+))
 ```
+
+Over SSH, `apply_tag_changes()` uploads the script and the suggestions file, then copies the change log back to the local path, including when the run fails. That log is the only post-level record for a tag revert. If the copy back fails, the call raises an error naming the path still on the server: fetch that file before doing anything else.
 
 Tag mode replaces each post's tag set rather than adding to it, rejects any entry without a `tags` list, and writes `SET_TAGS` rows with the same columns as the WordPress.com tag change log. Create and delete tags with `WpCliAdapter.create_tag()` / `delete_tag(term_id)`, in the same order as above. WordPress resolves the integer tag IDs by ID, so `tags_drift` does not apply to WP-CLI runs and the smoke test below is only needed for WordPress.com.
 

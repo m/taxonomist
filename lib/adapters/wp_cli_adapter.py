@@ -118,6 +118,15 @@ class WpCliAdapter:
         if result.returncode != 0:
             raise Exception(f'SCP upload error: {result.stderr}')
 
+    def _download(self, remote_path, local_path):
+        """Copy a remote file back over scp. Returns whether it worked."""
+        result = subprocess.run(
+            ['scp', '--', f'{self._ssh_target()}:{remote_path}', local_path],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
     def list_categories(self):
         """List all categories as JSON."""
         output = self._run_command([
@@ -126,52 +135,112 @@ class WpCliAdapter:
         ])
         return json.loads(output)
 
-    def export_posts(self, output_path):
-        """Export posts using the bundled export-posts.php script.
+    def _run_script(self, script, inputs=None, outputs=None, env=None):
+        """Run a bundled PHP script with `wp eval-file`.
 
-        The script ships with this repo, not on the target, so it is
+        The scripts ship with this repo, not on the target, so they are
         referenced by absolute path locally and uploaded before use over
         SSH (the remote home is not the repo).
+
+        inputs and outputs map environment variables to local file paths.
+        Paths are made absolute because the command runs from the WP
+        directory. Over SSH, inputs are uploaded first and outputs are
+        copied back afterwards. An output can be the only record of what
+        the script changed, so it is copied back even when the script
+        fails, and stays on the server if that copy fails.
+
+        Returns the script's stdout.
         """
-        php_script = os.path.join(_LIB_DIR, 'export-posts.php')
+        inputs = {k: os.path.abspath(v) for k, v in (inputs or {}).items()}
+        outputs = {k: os.path.abspath(v) for k, v in (outputs or {}).items()}
+        for path in outputs.values():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        php_script = os.path.join(_LIB_DIR, script)
 
-        if self.method == 'wp-cli-ssh':
-            token = next(tempfile._get_candidate_names())
-            remote_output = posixpath.join(
-                '/tmp', f'taxonomist-export-{token}.json',
+        if self.method != 'wp-cli-ssh':
+            return self._run_command(
+                ['eval-file', php_script],
+                env={**(env or {}), **inputs, **outputs},
             )
-            remote_script = posixpath.join(
-                '/tmp', f'taxonomist-export-posts-{token}.php',
-            )
-            try:
-                self._upload(php_script, remote_script)
-                self._run_command(
-                    ['eval-file', remote_script],
-                    env={'TAXONOMIST_OUTPUT': remote_output},
-                )
-                result = subprocess.run(
-                    ['scp', '--',
-                     f'{self._ssh_target()}:{remote_output}', output_path],
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode != 0:
-                    raise Exception(f'SCP error: {result.stderr}')
-            finally:
-                try:
-                    self._run_remote_shell(
-                        f'rm -f -- {shlex.quote(remote_output)} '
-                        f'{shlex.quote(remote_script)}'
-                    )
-                except Exception:
-                    pass
-            return output_path
 
-        self._run_command(
-            ['eval-file', php_script],
-            env={'TAXONOMIST_OUTPUT': output_path},
+        self._ssh_target()
+        token = next(tempfile._get_candidate_names())
+
+        def remote_path(name):
+            return posixpath.join('/tmp', f'taxonomist-{token}-{name}')
+
+        remote_script = remote_path(script)
+        remote_inputs = {k: remote_path(k.lower()) for k in inputs}
+        remote_outputs = {k: remote_path(k.lower()) for k in outputs}
+
+        stdout = None
+        script_error = None
+        try:
+            self._upload(php_script, remote_script)
+            for key, path in inputs.items():
+                self._upload(path, remote_inputs[key])
+            stdout = self._run_command(
+                ['eval-file', remote_script],
+                env={**(env or {}), **remote_inputs, **remote_outputs},
+            )
+        except Exception as exc:
+            script_error = exc
+
+        not_copied = [
+            remote_outputs[key] for key, path in outputs.items()
+            if not self._download(remote_outputs[key], path)
+        ]
+        to_remove = [remote_script, *remote_inputs.values()]
+        to_remove += [
+            path for path in remote_outputs.values()
+            if path not in not_copied
+        ]
+        try:
+            quoted = ' '.join(shlex.quote(path) for path in to_remove)
+            self._run_remote_shell(f'rm -f -- {quoted}')
+        except Exception:
+            pass
+
+        if not_copied:
+            note = (
+                'Not copied back, still on the server if it was written: '
+                + ', '.join(not_copied)
+            )
+            raise Exception(f'{script_error} {note}' if script_error else note)
+        if script_error:
+            raise script_error
+        return stdout
+
+    def export_posts(self, output_path):
+        """Export posts using the bundled export-posts.php script."""
+        self._run_script(
+            'export-posts.php',
+            outputs={'TAXONOMIST_OUTPUT': output_path},
         )
         return output_path
+
+    def backup(self, output_path):
+        """Write a taxonomy backup using the bundled backup.php script."""
+        self._run_script(
+            'backup.php',
+            outputs={'TAXONOMIST_OUTPUT': output_path},
+        )
+        return output_path
+
+    def apply_tag_changes(self, suggestions_path, log_path, mode='preview'):
+        """Run apply-changes.php in tag mode and bring its log back.
+
+        mode is 'preview' or 'apply'. See apply-changes.php for the
+        suggestions format. Returns the script's stdout.
+        """
+        if mode not in ('preview', 'apply'):
+            raise ValueError(f'mode must be preview or apply, got {mode!r}')
+        return self._run_script(
+            'apply-changes.php',
+            inputs={'TAXONOMIST_SUGGESTIONS': suggestions_path},
+            outputs={'TAXONOMIST_LOG': log_path},
+            env={'TAXONOMIST_TAXONOMY': 'post_tag', 'TAXONOMIST_MODE': mode},
+        )
 
     def set_post_categories(self, post_id, category_ids):
         """Set categories for a post by term ID.
