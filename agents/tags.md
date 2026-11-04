@@ -90,6 +90,8 @@ On `wp-cli-ssh` / `wp-cli-local` the same call works. `WpCliAdapter.backup()` up
 
 **Known limitation — read before relying on this for tags specifically:** unlike categories, tag mutations do **not** yet have automated restore support. The backup captures tag state and `set_logging()`'s `tag_changes_log_path`/`tag_terms_log_path` (or, on WP-CLI, `lib/apply-changes.php`'s change log) record every tag change made during apply, but neither `restore()` nor `lib/restore.php` knows how to replay them yet. Tell the user this explicitly before applying anything: a tag-apply run is not currently a "one command to undo" operation the way a category-apply run is — recovery today means manually reading `tags`/`post_tags` back out of the backup JSON and reapplying by hand, or reading the change logs and reversing entries yourself. Get an explicit go-ahead from the user on this basis before applying tag changes, not just before applying category changes.
 
+**What the backup doesn't cover:** `tags`/`post_tags`, like the export, only read published posts of type `post`. Deleting a tag removes it from everything that has it, including drafts, scheduled and private posts, and custom post types, so those assignments can't be recovered from the backup. Those posts aren't in the plan either, so a merge leaves them with neither the old tag nor the new one. Tell the user this along with the restore limitation above.
+
 ## Step 3 — Find fragmentation candidates
 
 Before any AI analysis, run the cheap, deterministic pass first — it does most of the real work for tags:
@@ -217,7 +219,7 @@ Execution order, mirroring `agents/apply.md`'s category order:
 1. Create any approved new tags first (`adapter.create_tag(...)`), so they exist for post assignment.
 2. Update tag descriptions if any were part of the plan.
 3. Reassign posts: for each post whose tag set changes, call `adapter.set_post_tags(post_id, tag_ids, old_tag_ids=..., post_title=...)` — pass `old_tag_ids` from the export so the log entry is complete. If it raises `tags_drift`, follow the handling below. Note `set_post_tags()` defaults `allow_clear=True` (unlike `set_post_categories()`'s `allow_clear=False` default) since a post ending up with zero tags is a normal, intended outcome for some merges/retires, not an accident.
-4. Delete retired tags last, after every post referencing them has been reassigned — `adapter.delete_tag(term_id)`, resolved via the exported `term_id`, never a guessed slug.
+4. Delete retired tags last, after every post referencing them has been reassigned — `adapter.delete_tag(term_id)`, resolved via the exported `term_id`, never a guessed slug. This also removes the tag from posts outside the plan (see Step 2).
 
 Expect the same per-call latency (20–30s) and occasional `remote_request_timeout` behavior documented in `agents/apply.md`'s "Observed latency and timeout behavior" section — it's the identical WordPress.com/Jetpack API underneath, and `set_post_tags()` has the same read-back-on-timeout handling `set_post_categories()` does.
 
@@ -259,5 +261,5 @@ Same spot-check discipline as `agents/apply.md`'s Post-Apply Verification: re-fe
 ## Revert
 
 There is no automated tag revert yet (see the Step 2 limitation). If the user asks to undo a tag-apply run:
-1. Point them at the pre-apply backup file's `tags`/`post_tags` keys and the `tag-changes-{timestamp}.tsv`/`tag-terms-{timestamp}.tsv` logs (WP-CLI runs write only `tag-changes-{timestamp}.tsv`; tags it deleted are in the backup's `tags` list).
+1. Point them at the pre-apply backup file's `tags`/`post_tags` keys and the `tag-changes-{timestamp}.tsv`/`tag-terms-{timestamp}.tsv` logs (WP-CLI runs write only `tag-changes-{timestamp}.tsv`). The backup's `tags` list has the deleted tags themselves, but `post_tags` only holds their assignments on published posts (see Step 2).
 2. Offer to manually reconstruct and apply the inverse operations yourself, reading the logs the same way `agents/restore.md`'s inverse-replay does for categories, but do this as a one-off manual process — do not claim this is the same reliability guarantee the category `restore()` path provides.
