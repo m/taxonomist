@@ -384,6 +384,26 @@ class TestTagMethods(unittest.TestCase):
         self.assertIn('--description=Block editor', argv)
 
     @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_update_tag_sets_fields_by_id(self, mock_run):
+        mock_run.return_value = _ok_run()
+        WpCliAdapter(_local_config()).update_tag(31, {'description': '-a tag'})
+        argv = mock_run.call_args[0][0]
+        self.assertEqual(
+            argv[1:],
+            ['term', 'update', 'post_tag', '31', '--by=id', '--description=-a tag'],
+        )
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
+    def test_update_tag_rejects_unknown_fields(self, mock_run):
+        """Each key becomes a wp flag, so a key like `require` must not
+        reach the command line."""
+        adapter = WpCliAdapter(_local_config())
+        for fields in ({'require': 'evil.php'}, {}):
+            with self.assertRaises(ValueError):
+                adapter.update_tag(31, fields)
+        mock_run.assert_not_called()
+
+    @patch('adapters.wp_cli_adapter.subprocess.run')
     def test_delete_tag_by_int_id(self, mock_run):
         mock_run.return_value = _ok_run()
         adapter = WpCliAdapter(_local_config())

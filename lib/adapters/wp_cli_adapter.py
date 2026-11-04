@@ -342,6 +342,25 @@ class WpCliAdapter:
             args.append(f'--description={description}')
         return self._run_command(args)
 
+    def update_tag(self, term_id, fields):
+        """Update a tag's name, slug or description by term ID.
+
+        Takes the same arguments as WpcomAdapter.update_tag(). Only known
+        fields are accepted, since each key becomes a wp command-line flag.
+        """
+        if not isinstance(term_id, int):
+            raise TypeError(
+                f'term_id must be int, got {type(term_id).__name__}'
+            )
+        unknown = set(fields) - {'name', 'slug', 'description'}
+        if not fields or unknown:
+            raise ValueError(
+                f'fields must be name, slug or description, got {sorted(fields)}'
+            )
+        args = ['term', 'update', 'post_tag', str(term_id), '--by=id']
+        args.extend(f'--{key}={value}' for key, value in fields.items())
+        return self._run_command(args)
+
     def delete_tag(self, term_id):
         """Delete a tag by term ID."""
         if not isinstance(term_id, int):
