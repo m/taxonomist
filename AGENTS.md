@@ -143,7 +143,7 @@ taxonomist/
 │   └── tags.md            # Optional separate pass: analyze/optimize tags
 ├── lib/                   # PHP scripts for WP-CLI operations
 │   ├── export-posts.php   # Export posts with full content
-│   ├── apply-changes.php  # Apply category changes with logging
+│   ├── apply-changes.php  # Apply category or tag changes with logging
 │   ├── backup.php         # Create taxonomy backup
 │   └── restore.php        # Restore from backup
 ├── data/                  # Working data (gitignored)
@@ -200,7 +200,7 @@ For `wp-cli-*` connections the agent uses `lib/restore.php`. For `wpcom-api` it 
 
 Everything above is about categories. WordPress tags (`post_tag`) get their own, separate workflow — `agents/tags.md` — run in addition to, not instead of, the category workflow. It's optional: a user runs it only if they also want tags analyzed.
 
-Tags have a different failure mode than categories worth knowing before jumping in: categories are few and break by over-concentration (one catch-all eating half the posts); tags accumulate freely and break by fragmentation (many near-duplicate, low-use terms). `agents/tags.md` covers the deterministic fragmentation-detection pass (`lib.helpers.find_similar_tags()`) that should resolve most of a tag cloud before any AI analysis is needed. Currently `wpcom-api` only, and tag reverts are manual — there's no automated tag restore yet (see `agents/tags.md`'s Revert section).
+Tags have a different failure mode than categories worth knowing before jumping in: categories are few and break by over-concentration (one catch-all eating half the posts); tags accumulate freely and break by fragmentation (many near-duplicate, low-use terms). `agents/tags.md` covers the deterministic fragmentation-detection pass (`lib.helpers.find_similar_tags()`) that should resolve most of a tag cloud before any AI analysis is needed. Supported on `wpcom-api` and `wp-cli-*` connections, and tag reverts are manual — there's no automated tag restore yet (see `agents/tags.md`'s Revert section).
 
 ## Result Validation
 

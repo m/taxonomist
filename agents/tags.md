@@ -25,6 +25,8 @@ Connection and capability verification are identical to the category workflow �
 
 ## Step 1 — Export
 
+Both `wpcom-api` and `wp-cli-*` connections are supported. Each step below gives the WordPress.com version first and the WP-CLI version after it where they differ.
+
 Export all tags and each post's tag assignments to local JSON:
 
 ```python
@@ -53,13 +55,28 @@ json.dump(export_tags, open('data/export/tags.json', 'w'), indent=2)
 adapter.export_posts('data/export/posts.json')
 ```
 
+For `wp-cli-ssh` / `wp-cli-local`, `WpCliAdapter.list_tags()` already returns `term_id`/`count`, and `lib/export-posts.php` writes the same `tags`/`tag_ids`/`tag_slugs` fields per post:
+
+```python
+import sys, json
+sys.path.insert(0, 'lib')
+sys.path.insert(0, 'lib/adapters')
+from wp_cli_adapter import WpCliAdapter
+
+config = json.load(open('config.json'))
+adapter = WpCliAdapter(config)
+
+json.dump(adapter.list_tags(), open('data/export/tags.json', 'w'), indent=2)
+adapter.export_posts('data/export/posts.json')
+```
+
 `data/export/tags.json`'s `term_id`/`slug` are authoritative for later updates/deletes, exactly like `data/export/categories.json` — resolve against this file via `lib.helpers.resolve_tag_export_row()`, never guess a slug from a display name.
 
 Report the total tag count and a top-20-by-count distribution, same as the category export's post-export summary.
 
 ## Step 2 — Backup (hard gate)
 
-Before any analysis, create a backup — `WpcomAdapter.backup()` already captures tags (`tags`/`post_tags`/`total_tags`) alongside categories in the same call, so if a category-pass backup from this session is recent, a fresh one isn't strictly required, but err on the side of a fresh backup if any time has passed:
+Before any analysis, create a backup — `WpcomAdapter.backup()` and `lib/backup.php` both capture tags (`tags`/`post_tags`/`total_tags`) alongside categories in the same call, so if a category-pass backup from this session is recent, a fresh one isn't strictly required, but err on the side of a fresh backup if any time has passed:
 
 ```python
 from datetime import datetime, timezone
@@ -67,9 +84,13 @@ ts = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
 adapter.backup(f'data/backups/pre-tag-analysis-{ts}.json')
 ```
 
+On `wp-cli-ssh` / `wp-cli-local` the same call works. `WpCliAdapter.backup()` uploads `lib/backup.php` over SSH and copies the backup back to the local path.
+
 **Validate it immediately, matching the hard-gate requirement in `agents/export.md`'s Backup section** — `lib.helpers.validate_backup()` doesn't check `tags`/`post_tags` specifically (they're additive fields, not in its required-keys list), but it does verify the backup is well-formed JSON with the base structure intact. Run it and STOP if invalid, same as the category pass.
 
-**Known limitation — read before relying on this for tags specifically:** unlike categories, tag mutations do **not** yet have automated restore support. The backup captures tag state and `set_logging()`'s `tag_changes_log_path`/`tag_terms_log_path` record every tag change made during apply, but `restore()` doesn't know how to replay either yet. Tell the user this explicitly before applying anything: a tag-apply run is not currently a "one command to undo" operation the way a category-apply run is — recovery today means manually reading `tags`/`post_tags` back out of the backup JSON and reapplying by hand, or reading the change logs and reversing entries yourself. Get an explicit go-ahead from the user on this basis before applying tag changes, not just before applying category changes.
+**Known limitation — read before relying on this for tags specifically:** unlike categories, tag mutations do **not** yet have automated restore support. The backup captures tag state and `set_logging()`'s `tag_changes_log_path`/`tag_terms_log_path` (or, on WP-CLI, `lib/apply-changes.php`'s change log) record every tag change made during apply, but neither `restore()` nor `lib/restore.php` knows how to replay them yet. Tell the user this explicitly before applying anything: a tag-apply run is not currently a "one command to undo" operation the way a category-apply run is — recovery today means manually reading `tags`/`post_tags` back out of the backup JSON and reapplying by hand, or reading the change logs and reversing entries yourself. Get an explicit go-ahead from the user on this basis before applying tag changes, not just before applying category changes.
+
+**What the backup doesn't cover:** `tags`/`post_tags`, like the export, only read published posts of type `post`. Deleting a tag removes it from everything that has it, including drafts, scheduled and private posts, and custom post types, so those assignments can't be recovered from the backup. Those posts aren't in the plan either, so a merge leaves them with neither the old tag nor the new one. Tell the user this along with the restore limitation above.
 
 ## Step 3 — Find fragmentation candidates
 
@@ -185,7 +206,7 @@ Use `AskUserQuestion` for the whole-plan approval, same as the category workflow
 
 Re-check the capability probe if meaningful time has passed since Step 0, same as `agents/apply.md`'s re-check-before-apply step.
 
-Enable tag logging alongside (or instead of) category logging:
+**WordPress.com.** Enable tag logging alongside (or instead of) category logging:
 
 ```python
 adapter.set_logging(
@@ -198,11 +219,34 @@ Execution order, mirroring `agents/apply.md`'s category order:
 1. Create any approved new tags first (`adapter.create_tag(...)`), so they exist for post assignment.
 2. Update tag descriptions if any were part of the plan.
 3. Reassign posts: for each post whose tag set changes, call `adapter.set_post_tags(post_id, tag_ids, old_tag_ids=..., post_title=...)` — pass `old_tag_ids` from the export so the log entry is complete. If it raises `tags_drift`, follow the handling below. Note `set_post_tags()` defaults `allow_clear=True` (unlike `set_post_categories()`'s `allow_clear=False` default) since a post ending up with zero tags is a normal, intended outcome for some merges/retires, not an accident.
-4. Delete retired tags last, after every post referencing them has been reassigned — `adapter.delete_tag(term_id)`, resolved via the exported `term_id`, never a guessed slug.
+4. Delete retired tags last, after every post referencing them has been reassigned — `adapter.delete_tag(term_id)`, resolved via the exported `term_id`, never a guessed slug. This also removes the tag from posts outside the plan (see Step 2).
 
 Expect the same per-call latency (20–30s) and occasional `remote_request_timeout` behavior documented in `agents/apply.md`'s "Observed latency and timeout behavior" section — it's the identical WordPress.com/Jetpack API underneath, and `set_post_tags()` has the same read-back-on-timeout handling `set_post_categories()` does.
 
-**Handling `tags_drift`.** `tags_by_id` does not resolve tags the way `categories_by_id` resolves categories. The v1.2 posts endpoint turns each tag ID into the tag's *name*, and WordPress core then looks that name up by slug first. If a tag's name sanitizes to a slug that belongs to a different tag, the post gets the other tag. This is most likely on sites with renamed or case-variant tags, which is exactly what a fragmentation cleanup works on: keeping `"Wordpress"` and retiring `"WordPress"` can send posts to the tag that is about to be deleted. `set_post_tags()` compares the post's resulting tags to what it sent and raises `WpcomApiError` with error `tags_drift` on any mismatch.
+**WP-CLI.** Use `lib/apply-changes.php` in tag mode for the post reassignments (step 3 above), not a loop of `set_post_tags()` calls. Build one suggestions file from the approved plan where each entry's `tags` is the post's complete new tag list (`[]` clears it), then preview before applying:
+
+```python
+# Preview (default mode)
+print(adapter.apply_tag_changes(
+    'data/tag-suggestions.json', f'data/logs/tag-preview-{ts}.tsv',
+))
+
+# Apply
+print(adapter.apply_tag_changes(
+    'data/tag-suggestions.json', f'data/logs/tag-changes-{ts}.tsv',
+    mode='apply',
+))
+```
+
+Give every run its own log path, using a fresh `{ts}` for each one. `apply_tag_changes()` refuses a path that already exists, because the script overwrites its log and a re-run skips posts that were already changed, so their rows would be lost. A preview writes the same `SET_TAGS` rows as an apply, which is why it goes to a `tag-preview-*` file: never read one as a record of real changes.
+
+Over SSH, `apply_tag_changes()` uploads the script and the suggestions file, then copies the change log back to the local path, including when the run fails. That log is the only post-level record for a tag revert. If the copy back fails, the call raises an error naming the path still on the server: fetch that file before doing anything else.
+
+**If a run reports any errors, STOP and report them. Do not delete any tags.** Tag mode exits non-zero when `Errors` is above 0, so `apply_tag_changes()` raises. A post that failed keeps its old tags and gets no log row, so deleting a retired tag at that point would remove the tag from that post with no record of it. Fix the cause and re-run with a new log path before moving on to deletes, the same rule as the Safety section of `agents/apply.md`. Keep the failed run's log too: together the logs are the record of what changed.
+
+Tag mode replaces each post's tag set rather than adding to it, rejects any entry without a `tags` list, and writes `SET_TAGS` rows with the same columns as the WordPress.com tag change log. Create, update and delete tags with `WpCliAdapter.create_tag()` / `update_tag(term_id, {'description': ...})` / `delete_tag(term_id)`, in the same order as above. WordPress resolves the integer tag IDs by ID, so `tags_drift` does not apply to WP-CLI runs and the smoke test below is only needed for WordPress.com.
+
+**Handling `tags_drift`** (WordPress.com only). `tags_by_id` does not resolve tags the way `categories_by_id` resolves categories. The v1.2 posts endpoint turns each tag ID into the tag's *name*, and WordPress core then looks that name up by slug first. If a tag's name sanitizes to a slug that belongs to a different tag, the post gets the other tag. This is most likely on sites with renamed or case-variant tags, which is exactly what a fragmentation cleanup works on: keeping `"Wordpress"` and retiring `"WordPress"` can send posts to the tag that is about to be deleted. `set_post_tags()` compares the post's resulting tags to what it sent and raises `WpcomApiError` with error `tags_drift` on any mismatch.
 
 When `set_post_tags()` raises `tags_drift`:
 1. STOP the apply run. Do not continue to other posts, and do not run any Step 7.4 deletes.
@@ -210,7 +254,7 @@ When `set_post_tags()` raises `tags_drift`:
 3. If the restore raises `tags_drift` too (the same collision can affect the post's original tags), do not retry. Give the user the post ID, the tag IDs it should have, and the tags it ended up with from the error message, so they can fix it in wp-admin.
 4. Report the colliding tags to the user (the `dropped`/`extra` IDs in the error message) and revise the plan for them before resuming, for example by keeping the other tag of the pair as the merge target.
 
-**Before this first real apply run against tags on any given site**, do a small live smoke test first: create one throwaway tag, assign it to a single test post via `set_post_tags()`, read the post back to confirm it landed, then delete the tag. The POST side of `tags_by_id` has not yet been verified against a live site (reads are confirmed), so confirming it once, cheaply, before running it across dozens of real posts is worth the extra two minutes. A passing smoke test only shows that the basic POST works. It does not show that renamed or case-variant tags are safe, so the `tags_drift` handling above still applies to every call.
+**Before this first real apply run against tags on any given WordPress.com site**, do a small live smoke test first: create one throwaway tag, assign it to a single test post via `set_post_tags()`, read the post back to confirm it landed, then delete the tag. The POST side of `tags_by_id` has not yet been verified against a live site (reads are confirmed), so confirming it once, cheaply, before running it across dozens of real posts is worth the extra two minutes. A passing smoke test only shows that the basic POST works. It does not show that renamed or case-variant tags are safe, so the `tags_drift` handling above still applies to every call.
 
 ## Step 8 — Verify
 
@@ -219,5 +263,5 @@ Same spot-check discipline as `agents/apply.md`'s Post-Apply Verification: re-fe
 ## Revert
 
 There is no automated tag revert yet (see the Step 2 limitation). If the user asks to undo a tag-apply run:
-1. Point them at the pre-apply backup file's `tags`/`post_tags` keys and the `tag-changes-{timestamp}.tsv`/`tag-terms-{timestamp}.tsv` logs.
+1. Point them at the pre-apply backup file's `tags`/`post_tags` keys and the `tag-changes-{timestamp}.tsv`/`tag-terms-{timestamp}.tsv` logs (WP-CLI runs write only `tag-changes-{timestamp}.tsv`). The backup's `tags` list has the deleted tags themselves, but `post_tags` only holds their assignments on published posts (see Step 2).
 2. Offer to manually reconstruct and apply the inverse operations yourself, reading the logs the same way `agents/restore.md`'s inverse-replay does for categories, but do this as a one-off manual process — do not claim this is the same reliability guarantee the category `restore()` path provides.

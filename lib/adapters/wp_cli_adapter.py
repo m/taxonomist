@@ -118,6 +118,15 @@ class WpCliAdapter:
         if result.returncode != 0:
             raise Exception(f'SCP upload error: {result.stderr}')
 
+    def _download(self, remote_path, local_path):
+        """Copy a remote file back over scp. Returns whether it worked."""
+        result = subprocess.run(
+            ['scp', '--', f'{self._ssh_target()}:{remote_path}', local_path],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
     def list_categories(self):
         """List all categories as JSON."""
         output = self._run_command([
@@ -126,52 +135,119 @@ class WpCliAdapter:
         ])
         return json.loads(output)
 
-    def export_posts(self, output_path):
-        """Export posts using the bundled export-posts.php script.
+    def _run_script(self, script, inputs=None, outputs=None, env=None):
+        """Run a bundled PHP script with `wp eval-file`.
 
-        The script ships with this repo, not on the target, so it is
+        The scripts ship with this repo, not on the target, so they are
         referenced by absolute path locally and uploaded before use over
         SSH (the remote home is not the repo).
+
+        inputs and outputs map environment variables to local file paths.
+        Paths are made absolute because the command runs from the WP
+        directory. Over SSH, inputs are uploaded first and outputs are
+        copied back afterwards. An output can be the only record of what
+        the script changed, so it is copied back even when the script
+        fails, and stays on the server if that copy fails.
+
+        Returns the script's stdout.
         """
-        php_script = os.path.join(_LIB_DIR, 'export-posts.php')
+        inputs = {k: os.path.abspath(v) for k, v in (inputs or {}).items()}
+        outputs = {k: os.path.abspath(v) for k, v in (outputs or {}).items()}
+        for path in outputs.values():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        php_script = os.path.join(_LIB_DIR, script)
 
-        if self.method == 'wp-cli-ssh':
-            token = next(tempfile._get_candidate_names())
-            remote_output = posixpath.join(
-                '/tmp', f'taxonomist-export-{token}.json',
+        if self.method != 'wp-cli-ssh':
+            return self._run_command(
+                ['eval-file', php_script],
+                env={**(env or {}), **inputs, **outputs},
             )
-            remote_script = posixpath.join(
-                '/tmp', f'taxonomist-export-posts-{token}.php',
-            )
-            try:
-                self._upload(php_script, remote_script)
-                self._run_command(
-                    ['eval-file', remote_script],
-                    env={'TAXONOMIST_OUTPUT': remote_output},
-                )
-                result = subprocess.run(
-                    ['scp', '--',
-                     f'{self._ssh_target()}:{remote_output}', output_path],
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode != 0:
-                    raise Exception(f'SCP error: {result.stderr}')
-            finally:
-                try:
-                    self._run_remote_shell(
-                        f'rm -f -- {shlex.quote(remote_output)} '
-                        f'{shlex.quote(remote_script)}'
-                    )
-                except Exception:
-                    pass
-            return output_path
 
-        self._run_command(
-            ['eval-file', php_script],
-            env={'TAXONOMIST_OUTPUT': output_path},
+        self._ssh_target()
+        token = next(tempfile._get_candidate_names())
+
+        def remote_path(name):
+            return posixpath.join('/tmp', f'taxonomist-{token}-{name}')
+
+        remote_script = remote_path(script)
+        remote_inputs = {k: remote_path(k.lower()) for k in inputs}
+        remote_outputs = {k: remote_path(k.lower()) for k in outputs}
+
+        stdout = None
+        script_error = None
+        try:
+            self._upload(php_script, remote_script)
+            for key, path in inputs.items():
+                self._upload(path, remote_inputs[key])
+            stdout = self._run_command(
+                ['eval-file', remote_script],
+                env={**(env or {}), **remote_inputs, **remote_outputs},
+            )
+        except Exception as exc:
+            script_error = exc
+
+        not_copied = [
+            remote_outputs[key] for key, path in outputs.items()
+            if not self._download(remote_outputs[key], path)
+        ]
+        to_remove = [remote_script, *remote_inputs.values()]
+        to_remove += [
+            path for path in remote_outputs.values()
+            if path not in not_copied
+        ]
+        try:
+            quoted = ' '.join(shlex.quote(path) for path in to_remove)
+            self._run_remote_shell(f'rm -f -- {quoted}')
+        except Exception:
+            pass
+
+        if not_copied:
+            note = (
+                'Not copied back, still on the server if it was written: '
+                + ', '.join(not_copied)
+            )
+            raise Exception(f'{script_error} {note}' if script_error else note)
+        if script_error:
+            raise script_error
+        return stdout
+
+    def export_posts(self, output_path):
+        """Export posts using the bundled export-posts.php script."""
+        self._run_script(
+            'export-posts.php',
+            outputs={'TAXONOMIST_OUTPUT': output_path},
         )
         return output_path
+
+    def backup(self, output_path):
+        """Write a taxonomy backup using the bundled backup.php script."""
+        self._run_script(
+            'backup.php',
+            outputs={'TAXONOMIST_OUTPUT': output_path},
+        )
+        return output_path
+
+    def apply_tag_changes(self, suggestions_path, log_path, mode='preview'):
+        """Run apply-changes.php in tag mode and bring its log back.
+
+        mode is 'preview' or 'apply'. See apply-changes.php for the
+        suggestions format. Returns the script's stdout.
+
+        log_path must not exist yet. The script overwrites its log, and
+        the file may be the only record of an earlier run's changes.
+        """
+        if mode not in ('preview', 'apply'):
+            raise ValueError(f'mode must be preview or apply, got {mode!r}')
+        if os.path.exists(log_path):
+            raise ValueError(
+                f'{log_path} already exists. Give each run its own log path.'
+            )
+        return self._run_script(
+            'apply-changes.php',
+            inputs={'TAXONOMIST_SUGGESTIONS': suggestions_path},
+            outputs={'TAXONOMIST_LOG': log_path},
+            env={'TAXONOMIST_TAXONOMY': 'post_tag', 'TAXONOMIST_MODE': mode},
+        )
 
     def set_post_categories(self, post_id, category_ids):
         """Set categories for a post by term ID.
@@ -204,3 +280,91 @@ class WpCliAdapter:
     def delete_category(self, term_id):
         """Delete a category."""
         return self._run_command(['term', 'delete', 'category', str(term_id)])
+
+    # --- Tags ---
+    #
+    # Mirrors the category methods above for WordPress core's flat
+    # `post_tag` taxonomy (no parent, no default term). Bulk tag
+    # reassignment with logging goes through lib/apply-changes.php with
+    # TAXONOMIST_TAXONOMY=post_tag, the same way categories use it; these
+    # methods cover listing, one-off assignments, and term create/delete.
+
+    def list_tags(self):
+        """List all tags as JSON.
+
+        Same fields as list_categories() minus `parent`, which tags don't
+        have.
+        """
+        output = self._run_command([
+            'term', 'list', 'post_tag', '--format=json',
+            '--fields=term_id,name,slug,description,count',
+        ])
+        return json.loads(output)
+
+    def set_post_tags(self, post_id, tag_ids, allow_clear=True):
+        """Set a post's complete tag list by term ID.
+
+        Uses the same separate-positional-args + --by=id form as
+        set_post_categories(), for the same reason: anything else lets wp
+        match the value as a slug and create a junk tag. Matching by ID
+        also avoids the name-to-slug collision that makes
+        WpcomAdapter.set_post_tags() raise `tags_drift`.
+
+        An empty tag_ids list removes every tag from the post (`wp post
+        term set` needs at least one term, so this uses `wp post term
+        remove --all`). Tags have no default term, so this is a normal end
+        state; pass allow_clear=False to refuse it instead, matching
+        WpcomAdapter.set_post_tags().
+        """
+        tag_ids = [int(tid) for tid in tag_ids]
+        if not tag_ids:
+            if not allow_clear:
+                raise ValueError(
+                    f'set_post_tags(post_id={post_id}): refusing to set an '
+                    'empty tag list with allow_clear=False.'
+                )
+            return self._run_command(
+                ['post', 'term', 'remove', str(post_id), 'post_tag', '--all']
+            )
+        args = ['post', 'term', 'set', str(post_id), 'post_tag']
+        args.extend(str(tid) for tid in tag_ids)
+        args.append('--by=id')
+        return self._run_command(args)
+
+    def create_tag(self, name, slug, description=''):
+        """Create a new tag."""
+        # Same argument-injection guard as create_category(): name is a
+        # bare positional that wp would parse as a flag if it began with '-'.
+        _reject_option_like(name, 'tag name')
+        _reject_option_like(slug, 'tag slug')
+        args = ['term', 'create', 'post_tag', name, f'--slug={slug}']
+        if description:
+            args.append(f'--description={description}')
+        return self._run_command(args)
+
+    def update_tag(self, term_id, fields):
+        """Update a tag's name, slug or description by term ID.
+
+        Takes the same arguments as WpcomAdapter.update_tag(). Only known
+        fields are accepted, since each key becomes a wp command-line flag.
+        """
+        if not isinstance(term_id, int):
+            raise TypeError(
+                f'term_id must be int, got {type(term_id).__name__}'
+            )
+        unknown = set(fields) - {'name', 'slug', 'description'}
+        if not fields or unknown:
+            raise ValueError(
+                f'fields must be name, slug or description, got {sorted(fields)}'
+            )
+        args = ['term', 'update', 'post_tag', str(term_id), '--by=id']
+        args.extend(f'--{key}={value}' for key, value in fields.items())
+        return self._run_command(args)
+
+    def delete_tag(self, term_id):
+        """Delete a tag by term ID."""
+        if not isinstance(term_id, int):
+            raise TypeError(
+                f'term_id must be int, got {type(term_id).__name__}'
+            )
+        return self._run_command(['term', 'delete', 'post_tag', str(term_id)])

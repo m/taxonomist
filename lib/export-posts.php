@@ -1,11 +1,13 @@
 <?php
 /**
- * Export all published posts with full content and categories to JSON.
+ * Export all published posts with full content, categories and tags to JSON.
  *
  * Streams posts one-by-one to avoid memory issues on large sites.
  * Output is a JSON array where each element contains the post ID, title,
  * publication date, full text content (HTML stripped), assigned category
- * names, category term IDs, category slugs, and permalink URL.
+ * names, category term IDs, category slugs, the same three fields for
+ * tags (post_tag), and permalink URL. The field names match
+ * WpcomAdapter.export_posts() so agents/tags.md works with either export.
  *
  * Usage:
  *   wp eval-file export-posts.php
@@ -24,6 +26,9 @@
  *       "categories": ["WordPress", "Tech"],
  *       "category_ids": [4, 9],
  *       "category_slugs": ["wp", "tech"],
+ *       "tags": ["Gutenberg", "Plugins"],
+ *       "tag_ids": [31, 57],
+ *       "tag_slugs": ["gutenberg", "plugins"],
  *       "url": "https://example.com/2024/01/post-title/"
  *     },
  *     ...
@@ -108,6 +113,17 @@ while ( true ) {
 		$cat_ids   = wp_get_post_categories( $p->ID );
 		$cat_slugs = wp_get_post_categories( $p->ID, array( 'fields' => 'slugs' ) );
 
+		// Tags get the same three views, read from one term query. Tags
+		// have no default term, so an untagged post exports empty lists.
+		$post_tags = wp_get_post_tags( $p->ID );
+		if ( is_wp_error( $post_tags ) ) {
+			fclose( $fp );
+			WP_CLI::error( 'Failed to read tags for post ID ' . $p->ID . ': ' . $post_tags->get_error_message() );
+		}
+		$tag_names = wp_list_pluck( $post_tags, 'name' );
+		$tag_ids   = wp_list_pluck( $post_tags, 'term_id' );
+		$tag_slugs = wp_list_pluck( $post_tags, 'slug' );
+
 		// Strip HTML and collapse whitespace for clean plain-text content.
 		// Full content is preserved (not truncated) for accurate AI analysis.
 		$content = wp_strip_all_tags( $p->post_content );
@@ -123,6 +139,9 @@ while ( true ) {
 				'categories'     => array_values( $cat_names ),
 				'category_ids'   => array_values( $cat_ids ),
 				'category_slugs' => array_values( $cat_slugs ),
+				'tags'           => array_values( $tag_names ),
+				'tag_ids'        => array_map( 'intval', array_values( $tag_ids ) ),
+				'tag_slugs'      => array_values( $tag_slugs ),
 				'url'            => get_permalink( $p->ID ),
 			)
 		);

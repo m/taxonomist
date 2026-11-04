@@ -7,6 +7,11 @@
  * these allow a full restore to the pre-change state, including recreating
  * deleted categories and reassigning every post.
  *
+ * Tags (post_tag) are captured the same way, in `tags` and `post_tags`,
+ * matching the keys WpcomAdapter.backup() writes. This is capture-only:
+ * restore.php does not replay tag state yet, so a tag revert means reading
+ * these keys back by hand (see agents/tags.md).
+ *
  * Usage:
  *   wp eval-file backup.php
  *
@@ -25,6 +30,13 @@
  *     ],
  *     "post_categories": [
  *       {"post_id": 123, "post_title": "...", "category_ids": [1, 5], "category_slugs": ["tech", "ai"]}
+ *     ],
+ *     "total_tags": 199,
+ *     "tags": [
+ *       {"term_id": 31, "name": "...", "slug": "...", "description": "...", "count": 3}
+ *     ],
+ *     "post_tags": [
+ *       {"post_id": 123, "post_title": "...", "tag_ids": [31, 57], "tag_slugs": ["gutenberg", "plugins"]}
  *     ]
  *   }
  *
@@ -57,10 +69,32 @@ foreach ( $terms as $t ) {
 	);
 }
 
-// Export every published post's category assignments.
+// Export all tags the same way. Tags are flat, so there is no parent.
+$tags = get_terms(
+	array(
+		'taxonomy'   => 'post_tag',
+		'hide_empty' => false,
+	)
+);
+if ( is_wp_error( $tags ) ) {
+	WP_CLI::error( 'Failed to list tags: ' . $tags->get_error_message() );
+}
+$tag_data = array();
+foreach ( $tags as $t ) {
+	$tag_data[] = array(
+		'term_id'     => $t->term_id,
+		'name'        => $t->name,
+		'slug'        => $t->slug,
+		'description' => $t->description,
+		'count'       => $t->count,
+	);
+}
+
+// Export every published post's category and tag assignments.
 // Uses keyset pagination (ID > last_id) instead of offset-based paging
 // to prevent data loss if posts change during the backup.
 $post_cats  = array();
+$post_tags  = array();
 $batch_size = 200;
 $last_id    = 0;
 
@@ -105,6 +139,17 @@ while ( true ) {
 			'category_ids'   => $cat_ids,
 			'category_slugs' => array_values( $cat_slugs ),
 		);
+
+		$tag_terms = wp_get_post_tags( $p->ID );
+		if ( is_wp_error( $tag_terms ) ) {
+			WP_CLI::error( 'Failed to read tags for post ID ' . $p->ID . ': ' . $tag_terms->get_error_message() );
+		}
+		$post_tags[] = array(
+			'post_id'    => $p->ID,
+			'post_title' => $p->post_title,
+			'tag_ids'    => array_map( 'intval', array_values( wp_list_pluck( $tag_terms, 'term_id' ) ) ),
+			'tag_slugs'  => array_values( wp_list_pluck( $tag_terms, 'slug' ) ),
+		);
 	}
 
 	$last_id = $all_posts[ count( $all_posts ) - 1 ]->ID;
@@ -124,6 +169,9 @@ $backup = array(
 	'default_category_slug' => $default_cat_slug,
 	'categories'            => $term_data,
 	'post_categories'       => $post_cats,
+	'total_tags'            => count( $tag_data ),
+	'tags'                  => $tag_data,
+	'post_tags'             => $post_tags,
 );
 
 $backup_json = wp_json_encode( $backup, JSON_PRETTY_PRINT );
@@ -134,4 +182,4 @@ $bytes_written = file_put_contents( $output_file, $backup_json ); // phpcs:ignor
 if ( false === $bytes_written ) {
 	WP_CLI::error( 'Failed to write backup file: ' . $output_file );
 }
-WP_CLI::success( 'Backup saved to ' . $output_file . ' (' . count( $post_cats ) . ' posts, ' . count( $term_data ) . ' categories)' );
+WP_CLI::success( 'Backup saved to ' . $output_file . ' (' . count( $post_cats ) . ' posts, ' . count( $term_data ) . ' categories, ' . count( $tag_data ) . ' tags)' );
