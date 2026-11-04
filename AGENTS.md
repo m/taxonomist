@@ -147,9 +147,11 @@ taxonomist/
 │   ├── backup.php         # Create taxonomy backup
 │   └── restore.php        # Restore from backup
 ├── data/                  # Working data (gitignored)
-│   ├── export/            # Exported posts and categories
+│   ├── export/            # Exported posts, categories, and tags
 │   ├── batches/           # Split post batches for analysis
 │   ├── results/           # Agent analysis results
+│   ├── tag-batches/       # Post batches for the tag pass
+│   ├── tag-results/       # Tag pass analysis results
 │   ├── backups/           # Pre-change backups
 │   └── logs/              # Change logs
 └── .gitignore
@@ -166,7 +168,7 @@ taxonomist/
 
 Every operation that modifies the site is logged to `data/logs/`. Each apply run produces:
 
-- `data/backups/backup-{timestamp}.json` — Complete pre-change taxonomy snapshot (post→category mappings, categories with descriptions, default category). Always written before any mutation.
+- `data/backups/backup-{timestamp}.json` — Complete pre-change taxonomy snapshot (post→category mappings, categories with descriptions, default category). On `wpcom-api` it also holds `tags`, `post_tags`, and `total_tags`. Always written before any mutation.
 - `data/logs/changes-{timestamp}.tsv` — Per-post category assignment changes. Schema:
   ```
   timestamp  action  post_id  post_title  old_categories  new_categories  cats_added  cats_removed  old_category_slugs  new_category_slugs
@@ -177,6 +179,11 @@ Every operation that modifies the site is logged to `data/logs/`. Each apply run
   timestamp  action  term_id  slug  field  old_value  new_value
   ```
   Actions are `CREATE_CAT`, `DELETE_CAT`, `UPDATE_CAT` (one row per changed field), and `SET_DEFAULT`. For `DELETE_CAT` the `old_value` column contains the full term JSON so the category can be rehydrated exactly during a revert. Written by the wpcom adapter; for WP-CLI sites the existing `restore.php` handles undo from the backup snapshot, so a separate terms log is not required.
+- `data/logs/tag-changes-{timestamp}.tsv` and `data/logs/tag-terms-{timestamp}.tsv` — The tag pass's equivalents of the two logs above, written by the wpcom adapter when `set_logging()` gets `tag_changes_log_path` / `tag_terms_log_path`. Same column shapes, with tag column names in the post log:
+  ```
+  timestamp  action  post_id  post_title  old_tags  new_tags  tags_added  tags_removed  old_tag_slugs  new_tag_slugs
+  ```
+  Actions are `SET_TAGS`, `CREATE_TAG`, `DELETE_TAG`, and `UPDATE_TAG`. They are kept apart from the category logs because the restore agent can't replay them yet (see [Tags](#tags-optional-separate-pass)).
 - `data/logs/restore-{timestamp}.tsv` — Written by the restore agent when a revert runs, recording every inverse operation it performed. Lets a revert itself be audited.
 
 ### Reverting Changes

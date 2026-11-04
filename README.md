@@ -26,6 +26,7 @@ Invoke-WebRequest https://github.com/m/taxonomist/archive/main.zip -OutFile taxo
 - **Re-categorizes posts**: Uses AI to read every post and suggest the right categories
 - **Writes descriptions**: Generates clear descriptions for every category
 - **Rescues hidden categories**: Finds categories with few posts that should have many more
+- **Cleans up tags** (optional): A separate pass merges near-duplicate tags ("WordPress" vs "wordpress" vs "word-press"), retires one-off tags, and re-tags posts. WordPress.com connections only for now.
 
 ## Connection Methods
 
