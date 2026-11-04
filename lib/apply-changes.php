@@ -238,6 +238,7 @@ foreach ( $suggestions as $suggestion ) {
 	$current_post = get_post( $current_post_id );
 	if ( ! $current_post ) {
 		++$error_count;
+		WP_CLI::warning( 'Post not found: ID ' . $current_post_id );
 		continue;
 	}
 
@@ -369,6 +370,14 @@ foreach ( $suggestions as $suggestion ) {
 fclose( $log );
 // phpcs:enable
 
-$verb = ( 'apply' === $apply_mode ) ? 'Applied' : 'Would apply';
-WP_CLI::success( "$verb $changes changes. Skipped: $skipped. Errors: $error_count." );
+$verb    = ( 'apply' === $apply_mode ) ? 'Applied' : 'Would apply';
+$summary = "$verb $changes changes. Skipped: $skipped. Errors: $error_count.";
 WP_CLI::log( 'Log: ' . $log_file );
+
+// A failed post keeps its old tags and gets no log row, so deleting a retired
+// tag after this run would lose the assignment. Exit non-zero in tag mode so
+// the run can't pass for a success.
+if ( $is_tag_mode && $error_count > 0 ) {
+	WP_CLI::error( "$summary Do not delete any retired tags until the failed posts are fixed." );
+}
+WP_CLI::success( $summary );
