@@ -318,12 +318,20 @@ def aggregate_results(results_dir):
     If the same post_id appears multiple times, the last file in sorted order
     wins so targeted reruns can replace stale earlier results.
 
+    "new_cats" entries may be plain name strings or objects with a "name"
+    and an optional "parent_slug" (see validate_suggestions()). Both forms
+    are counted by name, so "Jazz" and {"name": "Jazz"} are the same
+    suggestion.
+
     Args:
         results_dir: Directory containing result-NNN.json files.
 
     Returns:
         Dict with 'suggestions' (list of dicts), 'category_counts' (Counter),
-        and 'new_category_counts' (Counter).
+        'new_category_counts' (Counter of new cat name -> count), and
+        'new_category_parents' (dict of new cat name -> Counter of suggested
+        parent_slug -> count; only names that received at least one parent
+        hint appear).
     """
     suggestions_by_post_id = {}
     unkeyed_suggestions = []
@@ -343,17 +351,34 @@ def aggregate_results(results_dir):
     all_suggestions = list(suggestions_by_post_id.values()) + unkeyed_suggestions
     cat_counts = Counter()
     new_cat_counts = Counter()
+    new_cat_parents = {}
     for post in all_suggestions:
         for cat in post.get('cats', []):
             cat_counts[cat] += 1
         for cat in post.get('new_cats', []):
-            new_cat_counts[cat] += 1
+            name, parent_slug = _parse_new_cat(cat)
+            new_cat_counts[name] += 1
+            if parent_slug:
+                new_cat_parents.setdefault(name, Counter())[parent_slug] += 1
 
     return {
         'suggestions': all_suggestions,
         'category_counts': cat_counts,
         'new_category_counts': new_cat_counts,
+        'new_category_parents': new_cat_parents,
     }
+
+
+def _parse_new_cat(entry):
+    """
+    Normalize a "new_cats" entry to a (name, parent_slug) tuple.
+
+    Accepts either a plain name string or an object with "name" and an
+    optional "parent_slug". parent_slug is None when absent or null.
+    """
+    if isinstance(entry, dict):
+        return entry.get('name'), entry.get('parent_slug')
+    return entry, None
 
 
 def aggregate_tag_results(results_dir):
@@ -470,7 +495,10 @@ def validate_suggestions(suggestions):
 
     Each entry must have an integer "post_id" and a list "cats".
     Values in "cats" must be category term IDs.
-    "new_cats" is optional.
+    "new_cats" is optional. Each of its entries is either a new category
+    name string, or an object with a non-empty string "name" and an
+    optional "parent_slug" (string slug of an existing category, or null
+    for root-level).
 
     Args:
         suggestions: Parsed JSON list from a result file.
@@ -500,10 +528,30 @@ def validate_suggestions(suggestions):
         if 'new_cats' in entry:
             if not isinstance(entry['new_cats'], list):
                 errors.append(f'{label}: "new_cats" must be list')
-            elif any(not isinstance(cat, str) for cat in entry['new_cats']):
-                errors.append(f'{label}: "new_cats" must contain only strings')
+            else:
+                for cat in entry['new_cats']:
+                    error = _new_cat_error(cat)
+                    if error:
+                        errors.append(f'{label}: {error}')
 
     return {'valid': not errors, 'errors': errors}
+
+
+def _new_cat_error(cat):
+    """
+    Return a validation error for one "new_cats" entry, or None if valid.
+    """
+    if isinstance(cat, str):
+        return None
+    if not isinstance(cat, dict):
+        return '"new_cats" entries must be strings or objects'
+    name = cat.get('name')
+    if not isinstance(name, str) or not name.strip():
+        return '"new_cats" objects must have a non-empty string "name"'
+    parent_slug = cat.get('parent_slug')
+    if parent_slug is not None and not isinstance(parent_slug, str):
+        return f'"new_cats" entry "{name}": "parent_slug" must be string or null'
+    return None
 
 
 def validate_tag_suggestions(suggestions):

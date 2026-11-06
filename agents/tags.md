@@ -132,6 +132,8 @@ Output format — mirrors `agents/analyze.md`'s suggestion shape, using `tags`/`
 }]
 ```
 
+`new_tags` entries are always plain name strings. Tags are flat, so there is no object form with a `parent_slug` the way `new_cats` has.
+
 Split tag batches into their own directory, not the category pass's `data/batches/`:
 
 ```python

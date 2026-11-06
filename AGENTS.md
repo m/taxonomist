@@ -259,8 +259,11 @@ Use `lib/helpers.py` for splitting batches, aggregating results, and encoding Wo
 results = aggregate_results('data/results/')
 suggestions = results['suggestions']        # list of suggestion dicts
 category_counts = results['category_counts']  # Counter of slug -> count
-new_category_counts = results['new_category_counts']  # Counter of new cat -> count
+new_category_counts = results['new_category_counts']  # Counter of new cat name -> count
+new_category_parents = results['new_category_parents']  # {new cat name: Counter of parent_slug -> count}
 ```
+
+Analysis agents may suggest a parent for a new category (`{"name": ..., "parent_slug": ...}` in `new_cats`; see `agents/analyze.md`). `new_category_parents` collects those hints. When building `create` actions for the hierarchy tree view, use the most common hint as the default `parent_slug` (`new_category_parents[name].most_common(1)[0][0]`), and call out in the plan any name whose agents disagreed on the parent. The user still makes the final call during plan review.
 
 Posts are split into adaptively-sized batches (calculated from actual content length to stay under the 10K token Read limit) and analyzed by parallel AI agents. Each agent receives:
 - The full post content (not truncated)

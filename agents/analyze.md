@@ -43,8 +43,15 @@ always output the `term_id` in `cats`.
   "cats": [56],
   "new_cats": ["photography"],
   "confidence": "medium"
+}, {
+  "post_id": 789,
+  "cats": [78],
+  "new_cats": [{"name": "Full Site Editing", "parent_slug": "themes"}],
+  "confidence": "high"
 }]
 ```
+
+Each `new_cats` entry is either a plain name string, or an object with a `name` and a `parent_slug` when the new category belongs under an existing one. `parent_slug` must be the **slug** of a category from the list you were given (not its name or `term_id`). Use the plain string form for a root-level category.
 
 Confidence levels:
 - `high` — Clear topical match, post is obviously about this
@@ -63,4 +70,4 @@ Confidence levels:
 - Be accurate — wrong categories are worse than missing ones
 - **Only suggest categories that are directly about the post's topic.** Do not add a secondary category unless the post genuinely covers that second topic. A post about a specific hobby is not a generic "recreation" post. A bookmarked link is not a "book recommendation". A YouTube tutorial is not "tech" just because it's on YouTube.
 - `new_cats` should only contain truly novel categories that would apply to multiple posts, not one-off topics
-- When suggesting a new category, include a `"parent_slug"` if it logically belongs under an existing category (e.g., a new "Full Site Editing" category belongs under "Themes"). This helps the hierarchy tree view show where new categories fit.
+- When suggesting a new category that logically belongs under an existing category, use the object form with a `"parent_slug"` (e.g., `{"name": "Full Site Editing", "parent_slug": "themes"}`). This helps the hierarchy tree view show where new categories fit.

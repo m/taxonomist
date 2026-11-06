@@ -325,6 +325,42 @@ class TestAggregateResults(unittest.TestCase):
             self.assertNotIn(10, cat_counts)
             self.assertEqual(new_counts['ML'], 1)
 
+    def test_new_cats_objects_counted_by_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_result(tmpdir, 'result-000.json', [
+                {'post_id': 1, 'cats': [10], 'new_cats': ['Full Site Editing']},
+                {'post_id': 2, 'cats': [10], 'new_cats': [
+                    {'name': 'Full Site Editing', 'parent_slug': 'themes'},
+                ]},
+                {'post_id': 3, 'cats': [10], 'new_cats': [
+                    {'name': 'Full Site Editing', 'parent_slug': 'themes'},
+                    {'name': 'Development', 'parent_slug': None},
+                ]},
+                {'post_id': 4, 'cats': [10], 'new_cats': [
+                    {'name': 'Full Site Editing', 'parent_slug': 'wordpress'},
+                ]},
+            ])
+            result = aggregate_results(tmpdir)
+            new_counts = result['new_category_counts']
+            parents = result['new_category_parents']
+            self.assertEqual(new_counts['Full Site Editing'], 4)
+            self.assertEqual(new_counts['Development'], 1)
+            self.assertEqual(parents['Full Site Editing']['themes'], 2)
+            self.assertEqual(parents['Full Site Editing']['wordpress'], 1)
+            self.assertEqual(
+                parents['Full Site Editing'].most_common(1)[0][0], 'themes'
+            )
+            # A null parent_slug is not a parent hint.
+            self.assertNotIn('Development', parents)
+
+    def test_new_category_parents_empty_for_string_new_cats(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._write_result(tmpdir, 'result-000.json', [
+                {'post_id': 1, 'cats': [10], 'new_cats': ['Jazz']},
+            ])
+            result = aggregate_results(tmpdir)
+            self.assertEqual(result['new_category_parents'], {})
+
     def test_sorted_file_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._write_result(tmpdir, 'result-001.json', [
@@ -467,11 +503,48 @@ class TestValidateSuggestions(unittest.TestCase):
         self.assertFalse(result['valid'])
         self.assertTrue(any('"cats" must contain only ints' in e for e in result['errors']))
 
-    def test_new_cats_entries_must_be_strings(self):
+    def test_new_cats_entries_must_be_strings_or_objects(self):
         data = [{'post_id': 1, 'cats': [10], 'new_cats': ['ml', 7]}]
         result = validate_suggestions(data)
         self.assertFalse(result['valid'])
-        self.assertTrue(any('"new_cats" must contain only strings' in e for e in result['errors']))
+        self.assertTrue(
+            any('"new_cats" entries must be strings or objects' in e for e in result['errors'])
+        )
+
+    def test_new_cats_accepts_objects_with_parent_slug(self):
+        data = [{
+            'post_id': 1,
+            'cats': [10],
+            'new_cats': [
+                'Jazz',
+                {'name': 'Full Site Editing', 'parent_slug': 'themes'},
+                {'name': 'Development', 'parent_slug': None},
+                {'name': 'Photography'},
+            ],
+        }]
+        result = validate_suggestions(data)
+        self.assertTrue(result['valid'])
+        self.assertEqual(result['errors'], [])
+
+    def test_new_cats_object_requires_name(self):
+        data = [{'post_id': 1, 'cats': [10], 'new_cats': [{'parent_slug': 'themes'}]}]
+        result = validate_suggestions(data)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('non-empty string "name"' in e for e in result['errors']))
+
+    def test_new_cats_object_rejects_blank_name(self):
+        data = [{'post_id': 1, 'cats': [10], 'new_cats': [{'name': '  '}]}]
+        result = validate_suggestions(data)
+        self.assertFalse(result['valid'])
+        self.assertTrue(any('non-empty string "name"' in e for e in result['errors']))
+
+    def test_new_cats_object_parent_slug_must_be_string_or_null(self):
+        data = [{'post_id': 1, 'cats': [10], 'new_cats': [{'name': 'FSE', 'parent_slug': 12}]}]
+        result = validate_suggestions(data)
+        self.assertFalse(result['valid'])
+        self.assertTrue(
+            any('"parent_slug" must be string or null' in e for e in result['errors'])
+        )
 
 
 class TestValidateBackup(unittest.TestCase):
